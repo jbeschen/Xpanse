@@ -1,0 +1,109 @@
+{
+  "resources": {
+    "water_ice": {
+      "name": "Water Ice",
+      "tier": 0,
+      "base_price": 10,
+      "description": "Frozen water extracted from celestial bodies",
+      "unit": "tons"
+    },
+    "iron_ore": {
+      "name": "Iron Ore",
+      "tier": 0,
+      "base_price": 15,
+      "description": "Raw iron-rich minerals",
+      "unit": "tons"
+    },
+    "silicates": {
+      "name": "Silicates",
+      "tier": 0,
+      "base_price": 8,
+      "description": "Silicon-based minerals",
+      "unit": "tons"
+    },
+    "rare_earths": {
+      "name": "Rare Earths",
+      "tier": 0,
+      "base_price": 50,
+      "description": "Rare earth elements essential for electronics",
+      "unit": "kg"
+    },
+    "helium3": {
+      "name": "Helium-3",
+      "tier": 0,
+      "base_price": 100,
+      "description": "Fusion fuel isotope",
+      "unit": "kg"
+    },
+    "refined_metal": {
+      "name": "Refined Metal",
+      "tier": 1,
+      "base_price": 40,
+      "description": "Processed metal alloys",
+      "unit": "tons"
+    },
+    "silicon": {
+      "name": "Silicon",
+      "tier": 1,
+      "base_price": 35,
+      "description": "Pure silicon for electronics",
+      "unit": "tons"
+    },
+    "water": {
+      "name": "Water",
+      "tier": 1,
+      "base_price": 25,
+      "description": "Purified water for life support",
+      "unit": "tons"
+    },
+    "fuel": {
+      "name": "Fuel",
+      "tier": 1,
+      "base_price": 60,
+      "description": "Propellant for spacecraft",
+      "unit": "tons"
+    },
+    "electronics": {
+      "name": "Electronics",
+      "tier": 2,
+      "base_price": 150,
+      "description": "Electronic components and circuits",
+      "unit": "units"
+    },
+    "machinery": {
+      "name": "Machinery",
+      "tier": 2,
+      "base_price": 200,
+      "description": "Mechanical equipment and parts",
+      "unit": "units"
+    },
+    "life_support": {
+      "name": "Life Support Units",
+      "tier": 2,
+      "base_price": 180,
+      "description": "Environmental systems for habitats",
+      "unit": "units"
+    },
+    "habitat_modules": {
+      "name": "Habitat Modules",
+      "tier": 3,
+      "base_price": 500,
+      "description": "Pre-fabricated living quarters",
+      "unit": "modules"
+    },
+    "ship_components": {
+      "name": "Ship Components",
+      "tier": 3,
+      "base_price": 800,
+      "description": "Spacecraft parts and assemblies",
+      "unit": "units"
+    },
+    "advanced_tech": {
+      "name": "Advanced Tech",
+      "tier": 3,
+      "base_price": 1000,
+      "description": "Cutting-edge technology",
+      "unit": "units"
+    }
+  }
+}

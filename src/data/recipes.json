@@ -1,0 +1,123 @@
+{
+  "recipes": {
+    "refine_metal": {
+      "name": "Refine Metal",
+      "category": "refinery",
+      "duration": 10.0,
+      "inputs": {
+        "iron_ore": 2.0
+      },
+      "outputs": {
+        "refined_metal": 1.0
+      }
+    },
+    "process_silicon": {
+      "name": "Process Silicon",
+      "category": "refinery",
+      "duration": 10.0,
+      "inputs": {
+        "silicates": 2.0
+      },
+      "outputs": {
+        "silicon": 1.0
+      }
+    },
+    "purify_water": {
+      "name": "Purify Water",
+      "category": "refinery",
+      "duration": 5.0,
+      "inputs": {
+        "water_ice": 1.5
+      },
+      "outputs": {
+        "water": 1.0
+      }
+    },
+    "produce_fuel": {
+      "name": "Produce Fuel",
+      "category": "refinery",
+      "duration": 15.0,
+      "inputs": {
+        "water": 1.0,
+        "helium3": 0.5
+      },
+      "outputs": {
+        "fuel": 1.0
+      }
+    },
+    "manufacture_electronics": {
+      "name": "Manufacture Electronics",
+      "category": "factory",
+      "duration": 20.0,
+      "inputs": {
+        "silicon": 2.0,
+        "rare_earths": 0.5
+      },
+      "outputs": {
+        "electronics": 1.0
+      }
+    },
+    "manufacture_machinery": {
+      "name": "Manufacture Machinery",
+      "category": "factory",
+      "duration": 25.0,
+      "inputs": {
+        "refined_metal": 3.0,
+        "electronics": 0.5
+      },
+      "outputs": {
+        "machinery": 1.0
+      }
+    },
+    "manufacture_life_support": {
+      "name": "Manufacture Life Support",
+      "category": "factory",
+      "duration": 20.0,
+      "inputs": {
+        "water": 2.0,
+        "electronics": 1.0
+      },
+      "outputs": {
+        "life_support": 1.0
+      }
+    },
+    "build_habitat_module": {
+      "name": "Build Habitat Module",
+      "category": "advanced_factory",
+      "duration": 60.0,
+      "inputs": {
+        "refined_metal": 5.0,
+        "life_support": 2.0,
+        "machinery": 1.0
+      },
+      "outputs": {
+        "habitat_modules": 1.0
+      }
+    },
+    "build_ship_components": {
+      "name": "Build Ship Components",
+      "category": "shipyard",
+      "duration": 45.0,
+      "inputs": {
+        "refined_metal": 4.0,
+        "electronics": 2.0,
+        "machinery": 2.0
+      },
+      "outputs": {
+        "ship_components": 1.0
+      }
+    },
+    "research_advanced_tech": {
+      "name": "Research Advanced Tech",
+      "category": "research",
+      "duration": 90.0,
+      "inputs": {
+        "electronics": 3.0,
+        "rare_earths": 2.0
+      },
+      "outputs": {
+        "advanced_tech": 1.0
+      }
+    }
+  }
+}

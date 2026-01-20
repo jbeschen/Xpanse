@@ -1,0 +1,134 @@
+{
+  "bodies": {
+    "Sun": {
+      "type": "star",
+      "parent": null,
+      "semi_major_axis_au": 0.0,
+      "orbital_period_days": 0,
+      "radius_km": 696340,
+      "color": [255, 255, 200],
+      "resources": []
+    },
+    "Mercury": {
+      "type": "planet",
+      "parent": "Sun",
+      "semi_major_axis_au": 0.387,
+      "orbital_period_days": 88,
+      "radius_km": 2439,
+      "color": [169, 169, 169],
+      "resources": [
+        {"type": "iron_ore", "richness": 1.5},
+        {"type": "rare_earths", "richness": 0.8}
+      ]
+    },
+    "Venus": {
+      "type": "planet",
+      "parent": "Sun",
+      "semi_major_axis_au": 0.723,
+      "orbital_period_days": 225,
+      "radius_km": 6051,
+      "color": [255, 198, 73],
+      "resources": [
+        {"type": "silicates", "richness": 1.2},
+        {"type": "rare_earths", "richness": 0.5}
+      ]
+    },
+    "Earth": {
+      "type": "planet",
+      "parent": "Sun",
+      "semi_major_axis_au": 1.0,
+      "orbital_period_days": 365.25,
+      "radius_km": 6371,
+      "color": [100, 149, 237],
+      "resources": [
+        {"type": "water_ice", "richness": 0.5},
+        {"type": "iron_ore", "richness": 1.0},
+        {"type": "silicates", "richness": 1.0},
+        {"type": "rare_earths", "richness": 0.3}
+      ]
+    },
+    "Moon": {
+      "type": "moon",
+      "parent": "Earth",
+      "semi_major_axis_au": 0.00257,
+      "orbital_period_days": 27.3,
+      "radius_km": 1737,
+      "color": [200, 200, 200],
+      "resources": [
+        {"type": "silicates", "richness": 1.0},
+        {"type": "helium3", "richness": 1.5}
+      ]
+    },
+    "Mars": {
+      "type": "planet",
+      "parent": "Sun",
+      "semi_major_axis_au": 1.524,
+      "orbital_period_days": 687,
+      "radius_km": 3389,
+      "color": [193, 68, 14],
+      "resources": [
+        {"type": "water_ice", "richness": 0.8},
+        {"type": "iron_ore", "richness": 1.3},
+        {"type": "silicates", "richness": 1.1}
+      ]
+    },
+    "Ceres": {
+      "type": "dwarf_planet",
+      "parent": "Sun",
+      "semi_major_axis_au": 2.77,
+      "orbital_period_days": 1682,
+      "radius_km": 473,
+      "color": [150, 150, 150],
+      "resources": [
+        {"type": "water_ice", "richness": 1.5},
+        {"type": "iron_ore", "richness": 1.2},
+        {"type": "silicates", "richness": 1.0}
+      ]
+    },
+    "Jupiter": {
+      "type": "planet",
+      "parent": "Sun",
+      "semi_major_axis_au": 5.203,
+      "orbital_period_days": 4333,
+      "radius_km": 69911,
+      "color": [255, 165, 79],
+      "resources": [
+        {"type": "helium3", "richness": 2.0}
+      ]
+    },
+    "Europa": {
+      "type": "moon",
+      "parent": "Jupiter",
+      "semi_major_axis_au": 0.00449,
+      "orbital_period_days": 3.55,
+      "radius_km": 1560,
+      "color": [200, 180, 150],
+      "resources": [
+        {"type": "water_ice", "richness": 2.0}
+      ]
+    },
+    "Saturn": {
+      "type": "planet",
+      "parent": "Sun",
+      "semi_major_axis_au": 9.537,
+      "orbital_period_days": 10759,
+      "radius_km": 58232,
+      "color": [238, 232, 170],
+      "resources": [
+        {"type": "helium3", "richness": 1.8}
+      ]
+    },
+    "Titan": {
+      "type": "moon",
+      "parent": "Saturn",
+      "semi_major_axis_au": 0.00817,
+      "orbital_period_days": 15.95,
+      "radius_km": 2574,
+      "color": [255, 180, 100],
+      "resources": [
+        {"type": "water_ice", "richness": 1.0},
+        {"type": "helium3", "richness": 0.5}
+      ]
+    }
+  }
+}
