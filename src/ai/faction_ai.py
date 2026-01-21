@@ -1,5 +1,6 @@
 """Faction-level strategic AI."""
 from __future__ import annotations
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -12,9 +13,11 @@ from ..entities.stations import Station, StationType
 from ..entities.ships import Ship, ShipType
 from ..simulation.resources import ResourceType, Inventory
 from ..simulation.economy import Market
+from ..solar_system.orbits import Position
 
 if TYPE_CHECKING:
-    pass
+    from ..systems.building import BuildingSystem
+    from ..core.world import World
 
 
 class FactionGoal(Enum):
@@ -45,6 +48,13 @@ class FactionAI(System):
         self._ai_states: dict[UUID, FactionAIState] = {}
         self._decision_interval = 30.0  # Seconds between major decisions
         self._time_since_decision = 0.0
+        self._building_system: "BuildingSystem | None" = None
+        self._world: "World | None" = None
+
+    def set_building_system(self, building_system: "BuildingSystem", world: "World") -> None:
+        """Set the building system reference for AI building."""
+        self._building_system = building_system
+        self._world = world
 
     def update(self, dt: float, entity_manager: EntityManager) -> None:
         """Update faction AI."""
@@ -141,9 +151,250 @@ class FactionAI(System):
         state: FactionAIState
     ) -> None:
         """Try to expand to a new location."""
-        # For now, just track the intent - actual station building
-        # would require more complex logic and events
-        pass
+        if not self._building_system or not self._world:
+            return
+
+        # Determine what to build based on current holdings
+        owned_stations = self._get_owned_station_types(faction_entity.id, entity_manager)
+
+        # Prioritize: Mining → Refinery → Factory chain
+        station_type = self._decide_station_type(owned_stations, faction)
+        if station_type is None:
+            return
+
+        # Find best location for this station type
+        location = self._find_best_location(
+            faction_entity.id, station_type, entity_manager
+        )
+        if location is None:
+            return
+
+        position, parent_body, resource_type = location
+
+        # Attempt to build
+        result = self._building_system.request_build(
+            world=self._world,
+            faction_id=faction_entity.id,
+            station_type=station_type,
+            position=position,
+            parent_body=parent_body,
+            resource_type=resource_type,
+        )
+
+        if result.success:
+            state.stations_ordered += 1
+
+    def _get_owned_station_types(
+        self,
+        faction_id: UUID,
+        entity_manager: EntityManager
+    ) -> dict[StationType, int]:
+        """Count station types owned by faction."""
+        counts: dict[StationType, int] = {}
+        for entity, station in entity_manager.get_all_components(Station):
+            if station.owner_faction_id == faction_id:
+                counts[station.station_type] = counts.get(station.station_type, 0) + 1
+        return counts
+
+    def _decide_station_type(
+        self,
+        owned_types: dict[StationType, int],
+        faction: Faction
+    ) -> StationType | None:
+        """Decide what type of station to build next."""
+        from ..systems.building import STATION_COSTS
+
+        # Build priority order for economic chain
+        # Start with mining, then refinery, then factory
+        mining_count = owned_types.get(StationType.MINING_STATION, 0)
+        refinery_count = owned_types.get(StationType.REFINERY, 0)
+        factory_count = owned_types.get(StationType.FACTORY, 0)
+        outpost_count = owned_types.get(StationType.OUTPOST, 0)
+
+        # If no stations at all, start with an outpost (cheapest)
+        if sum(owned_types.values()) == 0:
+            if faction.credits >= STATION_COSTS[StationType.OUTPOST]:
+                return StationType.OUTPOST
+            return None
+
+        # Need mining to fuel economy
+        if mining_count < 2 and faction.credits >= STATION_COSTS[StationType.MINING_STATION]:
+            return StationType.MINING_STATION
+
+        # Need refinery to process raw materials
+        if refinery_count < 1 and mining_count >= 1:
+            if faction.credits >= STATION_COSTS[StationType.REFINERY]:
+                return StationType.REFINERY
+
+        # Need factory for advanced goods
+        if factory_count < 1 and refinery_count >= 1:
+            if faction.credits >= STATION_COSTS[StationType.FACTORY]:
+                return StationType.FACTORY
+
+        # More mining for more resources
+        if mining_count < 4 and faction.credits >= STATION_COSTS[StationType.MINING_STATION]:
+            return StationType.MINING_STATION
+
+        # More outposts for presence
+        if outpost_count < 3 and faction.credits >= STATION_COSTS[StationType.OUTPOST]:
+            return StationType.OUTPOST
+
+        return None
+
+    def _find_best_location(
+        self,
+        faction_id: UUID,
+        station_type: StationType,
+        entity_manager: EntityManager
+    ) -> tuple[tuple[float, float], str, ResourceType | None] | None:
+        """Find the best location for a new station.
+
+        Returns:
+            (position, parent_body, resource_type) or None
+        """
+        from ..entities.celestial import CelestialBody
+        from ..solar_system.bodies import SOLAR_SYSTEM_DATA
+        from ..systems.building import MIN_STATION_DISTANCE
+
+        best_score = -float('inf')
+        best_location = None
+
+        # Evaluate each celestial body
+        for entity, body in entity_manager.get_all_components(CelestialBody):
+            pos = entity_manager.get_component(entity, Position)
+            if not pos:
+                continue
+
+            body_name = entity.name
+            body_data = SOLAR_SYSTEM_DATA.get(body_name)
+            if not body_data:
+                continue
+
+            # Skip the Sun
+            if body.body_type.value == "star":
+                continue
+
+            # Check if position is valid (not too close to other stations)
+            # Offset slightly from body center
+            test_position = (pos.x + 0.05, pos.y + 0.05)
+
+            if not self._is_position_valid(test_position, entity_manager, MIN_STATION_DISTANCE):
+                # Try other offsets
+                offsets = [(0.05, -0.05), (-0.05, 0.05), (-0.05, -0.05), (0.08, 0), (0, 0.08)]
+                valid = False
+                for ox, oy in offsets:
+                    test_position = (pos.x + ox, pos.y + oy)
+                    if self._is_position_valid(test_position, entity_manager, MIN_STATION_DISTANCE):
+                        valid = True
+                        break
+                if not valid:
+                    continue
+
+            # Score this location
+            score = self._score_location(
+                body_name, body_data, station_type, faction_id, entity_manager
+            )
+
+            if score > best_score:
+                best_score = score
+                # Determine resource type for mining stations
+                resource_type = None
+                if station_type == StationType.MINING_STATION and body_data.resources:
+                    # Pick the richest resource
+                    resource_type = max(body_data.resources, key=lambda x: x[1])[0]
+
+                best_location = (test_position, body_name, resource_type)
+
+        return best_location
+
+    def _is_position_valid(
+        self,
+        position: tuple[float, float],
+        entity_manager: EntityManager,
+        min_distance: float
+    ) -> bool:
+        """Check if a position is far enough from existing stations."""
+        px, py = position
+
+        for entity, station in entity_manager.get_all_components(Station):
+            pos = entity_manager.get_component(entity, Position)
+            if not pos:
+                continue
+
+            dx = pos.x - px
+            dy = pos.y - py
+            distance = math.sqrt(dx * dx + dy * dy)
+
+            if distance < min_distance:
+                return False
+
+        return True
+
+    def _score_location(
+        self,
+        body_name: str,
+        body_data,
+        station_type: StationType,
+        faction_id: UUID,
+        entity_manager: EntityManager
+    ) -> float:
+        """Score a location for building a specific station type."""
+        score = 0.0
+
+        # Prefer closer bodies (less travel time)
+        distance_from_sun = body_data.semi_major_axis
+        score -= distance_from_sun * 5  # Penalty for distance
+
+        # For mining stations, prioritize resource-rich bodies
+        if station_type == StationType.MINING_STATION:
+            for resource, richness in body_data.resources:
+                score += richness * 20
+
+        # For refineries/factories, prefer locations near mining
+        if station_type in (StationType.REFINERY, StationType.FACTORY):
+            nearby_mining = self._count_nearby_stations(
+                body_name, StationType.MINING_STATION, entity_manager
+            )
+            score += nearby_mining * 15
+
+        # Bonus for bodies we already have presence at
+        own_stations_at_body = self._count_faction_stations_at_body(
+            body_name, faction_id, entity_manager
+        )
+        if own_stations_at_body > 0:
+            score += 10
+
+        # Slight randomness to avoid all AIs picking same locations
+        import random
+        score += random.uniform(-5, 5)
+
+        return score
+
+    def _count_nearby_stations(
+        self,
+        body_name: str,
+        station_type: StationType,
+        entity_manager: EntityManager
+    ) -> int:
+        """Count stations of a type near a body."""
+        count = 0
+        for entity, station in entity_manager.get_all_components(Station):
+            if station.station_type == station_type and station.parent_body == body_name:
+                count += 1
+        return count
+
+    def _count_faction_stations_at_body(
+        self,
+        body_name: str,
+        faction_id: UUID,
+        entity_manager: EntityManager
+    ) -> int:
+        """Count faction's stations at a body."""
+        count = 0
+        for entity, station in entity_manager.get_all_components(Station):
+            if station.owner_faction_id == faction_id and station.parent_body == body_name:
+                count += 1
+        return count
 
     def _try_consolidate(
         self,

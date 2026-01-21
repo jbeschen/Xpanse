@@ -2,14 +2,18 @@
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+from uuid import UUID
 import pygame
 
 from ..config import COLORS
 from ..simulation.resources import ResourceType, BASE_PRICES
+from ..entities.stations import StationType
 
 if TYPE_CHECKING:
     from ..core.world import World
     from ..core.ecs import Entity
+    from ..systems.building import BuildingSystem
+    from ..entities.factions import Faction
 
 
 @dataclass
@@ -249,3 +253,213 @@ class MiniMap(Panel):
 
         if rect_w > 0 and rect_h > 0:
             pygame.draw.rect(surface, COLORS['ui_highlight'], (rect_x, rect_y, rect_w, rect_h), 1)
+
+
+# Station build options for menu
+BUILD_OPTIONS = [
+    (StationType.OUTPOST, "Outpost", 5000),
+    (StationType.MINING_STATION, "Mining Station", 10000),
+    (StationType.REFINERY, "Refinery", 20000),
+    (StationType.FACTORY, "Factory", 50000),
+    (StationType.SHIPYARD, "Shipyard", 75000),
+    (StationType.COLONY, "Colony", 100000),
+    (StationType.TRADE_HUB, "Trade Hub", 200000),
+]
+
+
+@dataclass
+class BuildMenuPanel(Panel):
+    """Panel for building stations."""
+    selected_index: int = -1
+    player_credits: float = 0.0
+
+    def __init__(self, x: int, y: int) -> None:
+        super().__init__(
+            x=x, y=y, width=220, height=230, title="Build Station [B]"
+        )
+        self.selected_index = -1
+        self.player_credits = 0.0
+
+    def update_credits(self, credits: float) -> None:
+        """Update the player's available credits."""
+        self.player_credits = credits
+
+    def select_option(self, index: int) -> StationType | None:
+        """Select a build option by index.
+
+        Returns:
+            Selected station type if valid and affordable, None otherwise
+        """
+        if 0 <= index < len(BUILD_OPTIONS):
+            station_type, name, cost = BUILD_OPTIONS[index]
+            if self.player_credits >= cost:
+                self.selected_index = index
+                return station_type
+        return None
+
+    def get_selected_type(self) -> StationType | None:
+        """Get the currently selected station type."""
+        if 0 <= self.selected_index < len(BUILD_OPTIONS):
+            return BUILD_OPTIONS[self.selected_index][0]
+        return None
+
+    def get_selected_cost(self) -> float:
+        """Get cost of currently selected station type."""
+        if 0 <= self.selected_index < len(BUILD_OPTIONS):
+            return BUILD_OPTIONS[self.selected_index][2]
+        return 0.0
+
+    def draw(self, surface: pygame.Surface, font: pygame.font.Font) -> None:
+        """Draw the build menu."""
+        if not self.visible:
+            return
+
+        # Draw background and border
+        super().draw(surface, font)
+
+        line_height = font.get_linesize()
+        y = self.y + 25
+
+        # Show credits
+        credits_text = f"Credits: {self.player_credits:,.0f}"
+        credits_surf = font.render(credits_text, True, COLORS['ui_highlight'])
+        surface.blit(credits_surf, (self.x + 10, y))
+        y += line_height + 5
+
+        # Draw separator
+        pygame.draw.line(
+            surface, self.border_color,
+            (self.x + 5, y), (self.x + self.width - 5, y), 1
+        )
+        y += 5
+
+        # Draw build options
+        for i, (station_type, name, cost) in enumerate(BUILD_OPTIONS):
+            can_afford = self.player_credits >= cost
+            is_selected = i == self.selected_index
+
+            # Choose color based on state
+            if is_selected:
+                color = COLORS['ui_highlight']
+                # Draw selection background
+                pygame.draw.rect(
+                    surface, (50, 50, 80),
+                    (self.x + 5, y - 2, self.width - 10, line_height + 2)
+                )
+            elif can_afford:
+                color = COLORS['ui_text']
+            else:
+                color = (100, 100, 100)  # Grayed out
+
+            # Draw option text
+            option_text = f"{i + 1}. {name}"
+            option_surf = font.render(option_text, True, color)
+            surface.blit(option_surf, (self.x + 10, y))
+
+            # Draw cost on right side
+            cost_text = f"{cost:,}"
+            cost_surf = font.render(cost_text, True, color)
+            surface.blit(cost_surf, (self.x + self.width - cost_surf.get_width() - 10, y))
+
+            y += line_height + 2
+
+        # Instructions at bottom
+        y += 5
+        pygame.draw.line(
+            surface, self.border_color,
+            (self.x + 5, y), (self.x + self.width - 5, y), 1
+        )
+        y += 5
+
+        hint_text = "Click to place | ESC to cancel"
+        hint_surf = font.render(hint_text, True, (150, 150, 150))
+        surface.blit(hint_surf, (self.x + 10, y))
+
+
+@dataclass
+class PlayerHUD(Panel):
+    """HUD showing player corporation status."""
+    faction_name: str = ""
+    faction_color: tuple[int, int, int] = (255, 255, 255)
+    credits: float = 0.0
+    station_count: int = 0
+    ship_count: int = 0
+
+    def __init__(self, x: int, y: int) -> None:
+        super().__init__(
+            x=x, y=y, width=200, height=100, title=""
+        )
+
+    def update(
+        self,
+        world: "World",
+        player_faction_id: UUID | None
+    ) -> None:
+        """Update HUD with current player stats."""
+        if not player_faction_id:
+            return
+
+        em = world.entity_manager
+
+        # Find player faction
+        from ..entities.factions import Faction
+        for entity, faction in em.get_all_components(Faction):
+            if entity.id == player_faction_id:
+                self.faction_name = entity.name
+                self.faction_color = faction.color
+                self.credits = faction.credits
+                break
+
+        # Count owned stations
+        from ..entities.stations import Station
+        self.station_count = 0
+        for entity, station in em.get_all_components(Station):
+            if station.owner_faction_id == player_faction_id:
+                self.station_count += 1
+
+        # Count owned ships
+        from ..entities.ships import Ship
+        self.ship_count = 0
+        for entity, ship in em.get_all_components(Ship):
+            if ship.owner_faction_id == player_faction_id:
+                self.ship_count += 1
+
+    def draw(self, surface: pygame.Surface, font: pygame.font.Font) -> None:
+        """Draw the player HUD."""
+        if not self.visible:
+            return
+
+        # Draw background
+        pygame.draw.rect(surface, self.bg_color, (self.x, self.y, self.width, self.height))
+        pygame.draw.rect(surface, self.border_color, (self.x, self.y, self.width, self.height), 2)
+
+        # Draw faction color bar at top
+        pygame.draw.rect(
+            surface, self.faction_color,
+            (self.x + 2, self.y + 2, self.width - 4, 4)
+        )
+
+        line_height = font.get_linesize()
+        y = self.y + 10
+
+        # Faction name
+        name_surf = font.render(self.faction_name, True, self.faction_color)
+        surface.blit(name_surf, (self.x + 10, y))
+        y += line_height + 5
+
+        # Credits
+        credits_text = f"Credits: {self.credits:,.0f}"
+        credits_surf = font.render(credits_text, True, COLORS['ui_text'])
+        surface.blit(credits_surf, (self.x + 10, y))
+        y += line_height
+
+        # Station count
+        station_text = f"Stations: {self.station_count}"
+        station_surf = font.render(station_text, True, COLORS['ui_text'])
+        surface.blit(station_surf, (self.x + 10, y))
+        y += line_height
+
+        # Ship count
+        ship_text = f"Ships: {self.ship_count}"
+        ship_surf = font.render(ship_text, True, COLORS['ui_text'])
+        surface.blit(ship_surf, (self.x + 10, y))

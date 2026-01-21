@@ -23,6 +23,8 @@ class InputAction(Enum):
     SPEED_DOWN = "speed_down"
     TOGGLE_UI = "toggle_ui"
     QUIT = "quit"
+    BUILD_MODE = "build_mode"  # Toggle build placement mode
+    CONFIRM_BUILD = "confirm_build"  # Place station at cursor
 
 
 @dataclass
@@ -163,6 +165,12 @@ class InputHandler:
 
         elif event.key == pygame.K_TAB:
             self._fire_action(InputAction.TOGGLE_UI)
+
+        elif event.key == pygame.K_b:
+            self._fire_action(InputAction.BUILD_MODE)
+
+        elif event.key == pygame.K_RETURN or event.key == pygame.K_KP_ENTER:
+            self._fire_action(InputAction.CONFIRM_BUILD)
 
         elif event.key == pygame.K_q:
             self._fire_action(InputAction.QUIT)

@@ -73,6 +73,16 @@ class FactionEvent(Event):
     faction_id: UUID
 
 
+@dataclass
+class StationBuiltEvent(Event):
+    """Fired when a station is constructed."""
+    station_id: UUID
+    faction_id: UUID
+    station_type: str  # StationType.value
+    position: tuple[float, float]
+    cost: float
+
+
 EventHandler = Callable[[Event], None]
 
 

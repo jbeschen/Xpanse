@@ -15,6 +15,7 @@ from .ai.ship_ai import ShipAI
 from .ui.camera import Camera
 from .ui.renderer import Renderer
 from .ui.input import InputHandler, InputAction
+from .systems.building import BuildingSystem
 
 
 def create_initial_world(world: World) -> None:
@@ -135,6 +136,103 @@ def create_initial_world(world: World) -> None:
     )
 
 
+# Competitive corporation definitions
+COMPETITIVE_CORPORATIONS = {
+    "Stellar Dynamics": {
+        "color": (100, 180, 255),  # Light blue
+        "is_player": True,
+    },
+    "Nova Industries": {
+        "color": (255, 100, 100),  # Red
+        "is_player": False,
+    },
+    "Frontier Mining Corp": {
+        "color": (100, 255, 100),  # Green
+        "is_player": False,
+    },
+    "Orbital Logistics": {
+        "color": (255, 200, 50),  # Gold
+        "is_player": False,
+    },
+    "Deep Space Ventures": {
+        "color": (200, 100, 255),  # Purple
+        "is_player": False,
+    },
+}
+
+
+def create_competitive_start(world: World) -> dict:
+    """Set up competitive corporation race with equal starting resources.
+
+    Returns:
+        Dictionary with 'player_faction_id' and 'corporations' info
+    """
+    from .entities.celestial import create_solar_system
+    from .entities.factions import create_faction, FactionType
+    from .entities.ships import create_ship, ShipType
+
+    # Create solar system
+    bodies = create_solar_system(world)
+
+    # Create corporations with equal resources
+    corporations = {}
+    player_faction_id = None
+
+    # Starting resources for each corporation
+    STARTING_CREDITS = 100000
+    STARTING_SHIPS = 2
+
+    # Ship starting positions - spread around Earth's orbit (1 AU)
+    # Each corp gets a slightly different starting angle
+    import math
+    num_corps = len(COMPETITIVE_CORPORATIONS)
+
+    for i, (name, config) in enumerate(COMPETITIVE_CORPORATIONS.items()):
+        # Create faction
+        faction = create_faction(
+            world=world,
+            name=name,
+            faction_type=FactionType.PLAYER if config["is_player"] else FactionType.CORPORATION,
+            color=config["color"],
+            credits=STARTING_CREDITS,
+            is_player=config["is_player"],
+        )
+
+        corporations[name] = {
+            "entity": faction,
+            "id": faction.id,
+            "color": config["color"],
+            "is_player": config["is_player"],
+        }
+
+        if config["is_player"]:
+            player_faction_id = faction.id
+
+        # Calculate starting position - spread around Earth orbit
+        angle = (2 * math.pi * i) / num_corps
+        base_x = 1.0 + 0.1 * math.cos(angle)
+        base_y = 0.1 * math.sin(angle)
+
+        # Create starting ships for this corporation
+        for ship_num in range(STARTING_SHIPS):
+            offset = 0.02 * ship_num
+            ship_position = (base_x + offset, base_y + offset)
+
+            create_ship(
+                world=world,
+                name=f"{name} Freighter {ship_num + 1}",
+                ship_type=ShipType.FREIGHTER,
+                position=ship_position,
+                owner_faction_id=faction.id,
+                is_trader=True,
+            )
+
+    return {
+        "player_faction_id": player_faction_id,
+        "corporations": corporations,
+    }
+
+
 def main() -> None:
     """Main entry point."""
     # Initialize Pygame
@@ -147,6 +245,10 @@ def main() -> None:
     world = World()
     event_bus = world.event_bus
 
+    # Create systems
+    building_system = BuildingSystem(event_bus)
+    faction_ai = FactionAI(event_bus)
+
     # Add systems (order matters - priority determines update order)
     world.add_system(OrbitalSystem())
     world.add_system(NavigationSystem())
@@ -156,24 +258,39 @@ def main() -> None:
     world.add_system(ShipAI(event_bus))
     world.add_system(TradeSystem(event_bus))
     world.add_system(EconomySystem(event_bus))
-    world.add_system(FactionAI(event_bus))
+    world.add_system(building_system)
+    world.add_system(faction_ai)
 
-    # Create initial world state
-    create_initial_world(world)
+    # Create competitive start (5 corporations racing)
+    game_state = create_competitive_start(world)
+    player_faction_id = game_state["player_faction_id"]
+
+    # Connect building system to faction AI
+    faction_ai.set_building_system(building_system, world)
 
     # Set up rendering
     camera = Camera()
     camera.fit_bounds(-2, -2, 2, 2)  # Start zoomed to show inner solar system
 
     renderer = Renderer(screen, camera)
+    renderer.set_player_faction(player_faction_id, world)
+    renderer.set_building_system(building_system)
+
     input_handler = InputHandler(camera)
 
     # Register input callbacks
     def on_select(world_x: float, world_y: float) -> None:
-        renderer.select_at(world_x, world_y, world)
+        # If in build mode, try to place a station
+        if renderer.build_mode_active:
+            renderer.try_place_station(world_x, world_y, world)
+        else:
+            renderer.select_at(world_x, world_y, world)
 
     def on_deselect() -> None:
-        renderer.deselect()
+        if renderer.build_mode_active:
+            renderer.cancel_build_mode()
+        else:
+            renderer.deselect()
 
     def on_pause() -> None:
         world.toggle_pause()
@@ -187,12 +304,26 @@ def main() -> None:
     def on_toggle_ui() -> None:
         renderer.toggle_ui()
 
+    def on_build_mode() -> None:
+        renderer.toggle_build_menu()
+
+    def on_confirm_build() -> None:
+        # Place station at current mouse position in build mode
+        if renderer.build_mode_active:
+            wx, wy = camera.screen_to_world(
+                input_handler.state.mouse_x,
+                input_handler.state.mouse_y
+            )
+            renderer.try_place_station(wx, wy, world)
+
     input_handler.register_callback(InputAction.SELECT, on_select)
     input_handler.register_callback(InputAction.DESELECT, on_deselect)
     input_handler.register_callback(InputAction.PAUSE, on_pause)
     input_handler.register_callback(InputAction.SPEED_UP, on_speed_up)
     input_handler.register_callback(InputAction.SPEED_DOWN, on_speed_down)
     input_handler.register_callback(InputAction.TOGGLE_UI, on_toggle_ui)
+    input_handler.register_callback(InputAction.BUILD_MODE, on_build_mode)
+    input_handler.register_callback(InputAction.CONFIRM_BUILD, on_confirm_build)
 
     # Main game loop
     running = True
@@ -201,10 +332,23 @@ def main() -> None:
         events = pygame.event.get()
         running = input_handler.process_events(events)
 
-        # Handle quit action
+        # Handle quit action and number keys for build menu
         for event in events:
-            if event.type == pygame.KEYDOWN and event.key == pygame.K_q:
-                running = False
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_q:
+                    running = False
+                # Number keys 1-7 for selecting station type in build menu
+                elif renderer.build_menu_visible:
+                    if event.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4,
+                                     pygame.K_5, pygame.K_6, pygame.K_7):
+                        index = event.key - pygame.K_1
+                        renderer.select_build_option(index)
+
+        # Update mouse world position for renderer
+        renderer.update_mouse_position(
+            input_handler.state.mouse_world_x,
+            input_handler.state.mouse_world_y
+        )
 
         # Update simulation
         dt = clock.tick(FPS) / 1000.0  # Delta time in seconds
