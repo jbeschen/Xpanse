@@ -66,6 +66,17 @@ class Orbit(Component):
         return (2 * math.pi) / self.orbital_period
 
 
+@dataclass
+class ParentBody(Component):
+    """Component for entities that stay at fixed offset from a parent body.
+
+    Used for moons (static relative to planet) and stations (locked to parent).
+    """
+    parent_name: str  # Name of parent celestial body
+    offset_x: float = 0.0  # Fixed offset in AU from parent
+    offset_y: float = 0.0  # Fixed offset in AU from parent
+
+
 class OrbitalMechanics:
     """Helper class for orbital calculations."""
 
@@ -132,7 +143,7 @@ class OrbitalSystem(System):
             if entity.name:
                 self._parent_positions[entity.name] = pos
 
-        # Second pass: update orbits
+        # Second pass: update orbits (for planets and other orbiting bodies)
         # Convert dt from seconds to days (1 real second = 1 game minute = 1/1440 day)
         dt_days = dt / 60.0  # dt is in game-minutes, convert to days
 
@@ -160,6 +171,18 @@ class OrbitalSystem(System):
                 pos.x = rel_x
                 pos.y = rel_y
 
+        # Third pass: update entities with ParentBody (moons, stations)
+        # These stay at fixed offset from their parent
+        for entity, parent_body in entity_manager.get_all_components(ParentBody):
+            pos = entity_manager.get_component(entity, Position)
+            if not pos:
+                continue
+
+            parent_pos = self._parent_positions.get(parent_body.parent_name)
+            if parent_pos:
+                pos.x = parent_pos.x + parent_body.offset_x
+                pos.y = parent_pos.y + parent_body.offset_y
+
 
 class MovementSystem(System):
     """System that updates positions based on velocity for non-orbital objects."""
@@ -168,8 +191,8 @@ class MovementSystem(System):
 
     def update(self, dt: float, entity_manager: EntityManager) -> None:
         """Update positions based on velocity."""
-        # Convert dt from game-minutes to days
-        dt_days = dt / 1440.0
+        # Convert dt to days - same as OrbitalSystem for consistency
+        dt_days = dt / 60.0
 
         for entity, vel in entity_manager.get_all_components(Velocity):
             # Skip if entity has an orbit (handled by OrbitalSystem)
@@ -186,11 +209,13 @@ class MovementSystem(System):
 
 @dataclass
 class NavigationTarget(Component):
-    """Component for entities moving towards a target."""
+    """Component for entities moving towards a target with acceleration."""
     target_x: float = 0.0
     target_y: float = 0.0
-    speed: float = 0.1  # AU per day
-    arrival_threshold: float = 0.01  # AU
+    max_speed: float = 2.0  # AU per day (cruise speed)
+    current_speed: float = 0.0  # Current speed (for acceleration)
+    acceleration: float = 0.5  # AU per day per day (how fast we speed up)
+    arrival_threshold: float = 0.02  # AU
 
     def has_arrived(self, current_pos: Position) -> bool:
         """Check if close enough to target."""
@@ -199,14 +224,23 @@ class NavigationTarget(Component):
         dist = math.sqrt(dx * dx + dy * dy)
         return dist <= self.arrival_threshold
 
+    def get_stopping_distance(self) -> float:
+        """Calculate distance needed to decelerate to stop."""
+        # d = v^2 / (2a) - basic kinematics
+        if self.acceleration <= 0:
+            return 0
+        return (self.current_speed * self.current_speed) / (2 * self.acceleration)
+
 
 class NavigationSystem(System):
-    """System that moves entities towards their navigation targets."""
+    """System that moves entities towards their navigation targets with acceleration."""
 
     priority = 3  # Run between orbital and movement systems
 
     def update(self, dt: float, entity_manager: EntityManager) -> None:
-        """Update velocities to move towards targets."""
+        """Update velocities to move towards targets with acceleration/deceleration."""
+        dt_days = dt / 60.0  # Same conversion as other systems
+
         for entity, nav in entity_manager.get_all_components(NavigationTarget):
             pos = entity_manager.get_component(entity, Position)
             vel = entity_manager.get_component(entity, Velocity)
@@ -218,14 +252,32 @@ class NavigationSystem(System):
                 # Stop at destination
                 vel.vx = 0.0
                 vel.vy = 0.0
+                nav.current_speed = 0.0
                 continue
 
-            # Calculate direction to target
+            # Calculate direction and distance to target
             dx = nav.target_x - pos.x
             dy = nav.target_y - pos.y
             dist = math.sqrt(dx * dx + dy * dy)
 
-            if dist > 0:
-                # Set velocity towards target
-                vel.vx = (dx / dist) * nav.speed
-                vel.vy = (dy / dist) * nav.speed
+            if dist <= 0:
+                continue
+
+            # Normalize direction
+            dir_x = dx / dist
+            dir_y = dy / dist
+
+            # Calculate stopping distance
+            stopping_dist = nav.get_stopping_distance()
+
+            # Determine if we should accelerate or decelerate
+            if dist <= stopping_dist + nav.arrival_threshold:
+                # Decelerate - we're close enough to start slowing down
+                nav.current_speed = max(0.1, nav.current_speed - nav.acceleration * dt_days)
+            elif nav.current_speed < nav.max_speed:
+                # Accelerate towards max speed
+                nav.current_speed = min(nav.max_speed, nav.current_speed + nav.acceleration * dt_days)
+
+            # Set velocity
+            vel.vx = dir_x * nav.current_speed
+            vel.vy = dir_y * nav.current_speed

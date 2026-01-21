@@ -39,12 +39,32 @@ class EntityManager:
         self._components: dict[type[Component], dict[UUID, Component]] = {}
         self._entity_components: dict[UUID, set[type[Component]]] = {}
 
-    def create_entity(self, name: str = "", tags: set[str] | None = None) -> Entity:
-        """Create a new entity."""
-        entity = Entity(name=name, tags=tags or set())
+    def create_entity(
+        self,
+        name: str = "",
+        tags: set[str] | None = None,
+        entity_id: UUID | None = None
+    ) -> Entity:
+        """Create a new entity.
+
+        Args:
+            name: Optional name for the entity
+            tags: Optional set of tags
+            entity_id: Optional specific ID (used when loading saves)
+        """
+        if entity_id:
+            entity = Entity(id=entity_id, name=name, tags=tags or set())
+        else:
+            entity = Entity(name=name, tags=tags or set())
         self._entities[entity.id] = entity
         self._entity_components[entity.id] = set()
         return entity
+
+    def clear(self) -> None:
+        """Clear all entities and components."""
+        self._entities.clear()
+        self._components.clear()
+        self._entity_components.clear()
 
     def destroy_entity(self, entity: Entity) -> None:
         """Remove an entity and all its components."""

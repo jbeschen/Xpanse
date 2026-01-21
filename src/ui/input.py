@@ -29,6 +29,14 @@ class InputAction(Enum):
     QUIT = "quit"
     BUILD_MODE = "build_mode"  # Toggle build placement mode
     CONFIRM_BUILD = "confirm_build"  # Place station at cursor
+    SHIP_PURCHASE = "ship_purchase"  # Open ship purchase menu
+    TOGGLE_ROUTES = "toggle_routes"  # Toggle trade route display
+    UPGRADE_STATION = "upgrade_station"  # Open station upgrade menu
+    QUICK_SAVE = "quick_save"  # Quick save game
+    QUICK_LOAD = "quick_load"  # Quick load game
+    TRADE_ROUTE = "trade_route"  # Open trade route setup
+    HELP = "help"  # Toggle help window
+    WAYPOINT = "waypoint"  # Set ship waypoint mode
 
 
 @dataclass
@@ -54,6 +62,7 @@ class InputHandler:
         self.state = InputState()
         self._callbacks: dict[InputAction, list[Callable]] = {}
         self._selected_entity_id = None
+        self.keyboard_pan_enabled = True  # Can be disabled when menus are open
 
     def register_callback(self, action: InputAction, callback: Callable) -> None:
         """Register a callback for an input action."""
@@ -184,6 +193,31 @@ class InputHandler:
         elif event.key == pygame.K_RETURN or event.key == pygame.K_KP_ENTER:
             self._fire_action(InputAction.CONFIRM_BUILD)
 
+        elif event.key == pygame.K_s:
+            self._fire_action(InputAction.SHIP_PURCHASE)
+
+        elif event.key == pygame.K_r:
+            self._fire_action(InputAction.TOGGLE_ROUTES)
+
+        elif event.key == pygame.K_u:
+            self._fire_action(InputAction.UPGRADE_STATION)
+
+        elif event.key == pygame.K_t:
+            self._fire_action(InputAction.TRADE_ROUTE)
+
+        elif event.key == pygame.K_F5:
+            self._fire_action(InputAction.QUICK_SAVE)
+
+        elif event.key == pygame.K_F9:
+            self._fire_action(InputAction.QUICK_LOAD)
+
+        elif event.key == pygame.K_h or event.key == pygame.K_F1:
+            self._fire_action(InputAction.HELP)
+
+        elif event.key == pygame.K_w:
+            # W triggers waypoint mode - main.py will check if ship is selected
+            self._fire_action(InputAction.WAYPOINT)
+
         elif event.key == pygame.K_q:
             self._fire_action(InputAction.QUIT)
 
@@ -193,6 +227,10 @@ class InputHandler:
 
     def _handle_keyboard_pan(self) -> None:
         """Handle continuous keyboard panning with WASD/Arrow keys."""
+        # Skip if keyboard panning is disabled (menu open)
+        if not self.keyboard_pan_enabled:
+            return
+
         # Pan speed in pixels per frame (adjust for smooth panning)
         pan_speed = 10
 

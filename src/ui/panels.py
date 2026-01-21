@@ -107,12 +107,82 @@ class InfoPanel(Panel):
 
         # Show ship info
         from ..entities.ships import Ship
+        from ..solar_system.orbits import NavigationTarget
+        from ..simulation.trade import Trader, ManualRoute, TradeState
         ship = em.get_component(entity, Ship)
         if ship:
             self.lines.append("")
             self.lines.append(f"Ship Type: {ship.ship_type.value}")
             self.lines.append(f"Fuel: {ship.fuel:.0f}/{ship.fuel_capacity:.0f}")
             self.lines.append(f"Crew: {ship.crew}/{ship.max_crew}")
+
+            # Gather ship state info
+            nav = em.get_component(entity, NavigationTarget)
+            trader = em.get_component(entity, Trader)
+            manual_route = em.get_component(entity, ManualRoute)
+
+            # Find destination name if navigating
+            dest_name = None
+            if nav:
+                # Check stations
+                for station_entity, _ in em.get_all_components(Station):
+                    station_pos = em.get_component(station_entity, Position)
+                    if station_pos:
+                        dist = ((station_pos.x - nav.target_x)**2 + (station_pos.y - nav.target_y)**2)**0.5
+                        if dist < 0.05:
+                            dest_name = station_entity.name
+                            break
+                # Check celestial bodies if no station found
+                if not dest_name:
+                    from ..entities.celestial import CelestialBody
+                    for body_entity, _ in em.get_all_components(CelestialBody):
+                        body_pos = em.get_component(body_entity, Position)
+                        if body_pos:
+                            dist = ((body_pos.x - nav.target_x)**2 + (body_pos.y - nav.target_y)**2)**0.5
+                            if dist < 0.1:
+                                dest_name = body_entity.name
+                                break
+
+            # Determine status based on what the ship is doing
+            is_moving = nav and nav.current_speed > 0.01
+
+            if manual_route and manual_route.waypoints:
+                # Ship has a player-assigned trade route
+                route_desc = " >> ".join(w.station_name or "?" for w in manual_route.waypoints)
+                self.lines.append(f"Route: {route_desc}")
+                if is_moving and dest_name:
+                    self.lines.append(f"Status: Trading > {dest_name}")
+                elif is_moving:
+                    self.lines.append(f"Status: Moving > ({nav.target_x:.2f}, {nav.target_y:.2f})")
+                else:
+                    waypoint = manual_route.get_current_waypoint()
+                    if waypoint:
+                        self.lines.append(f"Status: At {waypoint.station_name or 'waypoint'}")
+                    else:
+                        self.lines.append("Status: Route complete")
+            elif is_moving:
+                # Ship is moving but not on a manual route
+                if trader and trader.state in (TradeState.TRAVELING_TO_BUY, TradeState.TRAVELING_TO_SELL):
+                    action = "buying" if trader.state == TradeState.TRAVELING_TO_BUY else "selling"
+                    if dest_name:
+                        self.lines.append(f"Status: Trading ({action}) > {dest_name}")
+                    else:
+                        self.lines.append(f"Status: Trading ({action})")
+                else:
+                    if dest_name:
+                        self.lines.append(f"Status: Moving > {dest_name}")
+                    else:
+                        self.lines.append(f"Status: Moving > ({nav.target_x:.2f}, {nav.target_y:.2f})")
+            elif trader:
+                # Ship is stationary with trader component
+                if trader.state == TradeState.BUYING:
+                    self.lines.append("Status: Buying cargo")
+                elif trader.state == TradeState.SELLING:
+                    self.lines.append("Status: Selling cargo")
+                else:
+                    self.lines.append("Status: Idle")
+            else:
+                self.lines.append("Status: Idle")
 
         # Show celestial body info
         from ..entities.celestial import CelestialBody
@@ -507,3 +577,1005 @@ class PlayerHUD(Panel):
         ship_text = f"Ships: {self.ship_count}"
         ship_surf = font.render(ship_text, True, COLORS['ui_text'])
         surface.blit(ship_surf, (self.x + 10, y))
+
+
+# Ship purchase options
+from ..entities.ships import ShipType
+from ..systems.building import SHIP_COSTS, SHIP_MATERIAL_COSTS
+
+SHIP_OPTIONS = [
+    (ShipType.SHUTTLE, "Shuttle"),
+    (ShipType.FREIGHTER, "Freighter"),
+    (ShipType.TANKER, "Tanker"),
+    (ShipType.BULK_HAULER, "Bulk Hauler"),
+    (ShipType.MINING_SHIP, "Mining Ship"),
+]
+
+
+@dataclass
+class ShipPurchasePanel(Panel):
+    """Panel for purchasing ships at shipyards."""
+    selected_index: int = -1
+    player_credits: float = 0.0
+    player_materials: dict = field(default_factory=dict)
+    shipyard_id: UUID | None = None
+    shipyard_name: str = ""
+
+    def __init__(self, x: int, y: int) -> None:
+        super().__init__(
+            x=x, y=y, width=280, height=280, title="Purchase Ship [S]"
+        )
+        self.selected_index = -1
+        self.player_credits = 0.0
+        self.player_materials = {}
+        self.shipyard_id = None
+
+    def set_shipyard(self, shipyard_id: UUID | None, name: str = "") -> None:
+        """Set the current shipyard."""
+        self.shipyard_id = shipyard_id
+        self.shipyard_name = name
+
+    def update_player_resources(self, credits: float, materials: dict) -> None:
+        """Update the player's available credits and materials."""
+        self.player_credits = credits
+        self.player_materials = materials
+
+    def can_afford_ship(self, ship_type: ShipType) -> bool:
+        """Check if player can afford a ship (credits + materials)."""
+        cost = SHIP_COSTS.get(ship_type, float('inf'))
+        if self.player_credits < cost:
+            return False
+
+        material_reqs = SHIP_MATERIAL_COSTS.get(ship_type, {})
+        for resource, needed in material_reqs.items():
+            if self.player_materials.get(resource, 0) < needed:
+                return False
+
+        return True
+
+    def select_option(self, index: int) -> ShipType | None:
+        """Select a ship option by index."""
+        if 0 <= index < len(SHIP_OPTIONS):
+            ship_type, name = SHIP_OPTIONS[index]
+            if self.can_afford_ship(ship_type) and self.shipyard_id:
+                self.selected_index = index
+                return ship_type
+        return None
+
+    def get_selected_type(self) -> ShipType | None:
+        """Get the currently selected ship type."""
+        if 0 <= self.selected_index < len(SHIP_OPTIONS):
+            return SHIP_OPTIONS[self.selected_index][0]
+        return None
+
+    def draw(self, surface: pygame.Surface, font: pygame.font.Font) -> None:
+        """Draw the ship purchase menu."""
+        if not self.visible:
+            return
+
+        super().draw(surface, font)
+
+        line_height = font.get_linesize()
+        y = self.y + 25
+
+        # Show shipyard name
+        if self.shipyard_name:
+            yard_text = f"At: {self.shipyard_name}"
+            yard_surf = font.render(yard_text, True, COLORS['ui_text'])
+            surface.blit(yard_surf, (self.x + 10, y))
+        else:
+            no_yard = "No shipyard selected"
+            no_yard_surf = font.render(no_yard, True, (255, 100, 100))
+            surface.blit(no_yard_surf, (self.x + 10, y))
+        y += line_height + 2
+
+        # Show credits
+        credits_text = f"Credits: {self.player_credits:,.0f}"
+        credits_surf = font.render(credits_text, True, COLORS['ui_highlight'])
+        surface.blit(credits_surf, (self.x + 10, y))
+        y += line_height + 5
+
+        pygame.draw.line(
+            surface, self.border_color,
+            (self.x + 5, y), (self.x + self.width - 5, y), 1
+        )
+        y += 5
+
+        # Draw ship options
+        for i, (ship_type, name) in enumerate(SHIP_OPTIONS):
+            cost = SHIP_COSTS.get(ship_type, 0)
+            material_reqs = SHIP_MATERIAL_COSTS.get(ship_type, {})
+            can_afford = self.can_afford_ship(ship_type) and self.shipyard_id is not None
+            is_selected = i == self.selected_index
+
+            if is_selected:
+                color = COLORS['ui_highlight']
+                pygame.draw.rect(
+                    surface, (50, 50, 80),
+                    (self.x + 5, y - 2, self.width - 10, line_height + 2)
+                )
+            elif can_afford:
+                color = COLORS['ui_text']
+            else:
+                color = (100, 100, 100)
+
+            option_text = f"{i + 1}. {name}"
+            option_surf = font.render(option_text, True, color)
+            surface.blit(option_surf, (self.x + 10, y))
+
+            cost_text = f"{cost:,}c"
+            cost_surf = font.render(cost_text, True, color)
+            surface.blit(cost_surf, (self.x + self.width - cost_surf.get_width() - 10, y))
+
+            y += line_height
+
+            if material_reqs:
+                mat_parts = []
+                for resource, amount in material_reqs.items():
+                    abbrev = resource.value[:3].upper()
+                    have = self.player_materials.get(resource, 0)
+                    mat_color = color if have >= amount else (255, 100, 100)
+                    mat_parts.append((f"{abbrev}:{amount:.0f}", mat_color))
+
+                x_offset = self.x + 25
+                for mat_text, mat_color in mat_parts:
+                    mat_surf = font.render(mat_text, True, mat_color)
+                    surface.blit(mat_surf, (x_offset, y))
+                    x_offset += mat_surf.get_width() + 8
+
+                y += line_height
+
+            y += 2
+
+        y += 5
+        pygame.draw.line(
+            surface, self.border_color,
+            (self.x + 5, y), (self.x + self.width - 5, y), 1
+        )
+        y += 5
+
+        hint_text = "Select station then press S"
+        hint_surf = font.render(hint_text, True, (150, 150, 150))
+        surface.blit(hint_surf, (self.x + 10, y))
+
+
+@dataclass
+class Notification:
+    """A single notification message."""
+    message: str
+    notification_type: str
+    remaining_time: float
+    color: tuple[int, int, int] = (255, 255, 255)
+
+
+class NotificationPanel:
+    """Panel that displays notifications."""
+
+    def __init__(self, x: int, y: int, width: int = 300) -> None:
+        self.x = x
+        self.y = y
+        self.width = width
+        self.notifications: list[Notification] = []
+        self.max_notifications = 5
+
+        # Colors for notification types
+        self.type_colors = {
+            "info": (200, 200, 255),
+            "success": (100, 255, 100),
+            "warning": (255, 200, 100),
+            "error": (255, 100, 100),
+        }
+
+    def add_notification(self, message: str, notification_type: str = "info", duration: float = 5.0) -> None:
+        """Add a new notification."""
+        color = self.type_colors.get(notification_type, (255, 255, 255))
+        notification = Notification(
+            message=message,
+            notification_type=notification_type,
+            remaining_time=duration,
+            color=color
+        )
+        self.notifications.insert(0, notification)
+
+        # Limit notifications
+        if len(self.notifications) > self.max_notifications:
+            self.notifications = self.notifications[:self.max_notifications]
+
+    def update(self, dt: float) -> None:
+        """Update notification timers."""
+        for notif in self.notifications[:]:
+            notif.remaining_time -= dt
+            if notif.remaining_time <= 0:
+                self.notifications.remove(notif)
+
+    def draw(self, surface: pygame.Surface, font: pygame.font.Font) -> None:
+        """Draw notifications."""
+        if not self.notifications:
+            return
+
+        line_height = font.get_linesize() + 4
+        y = self.y
+
+        for notif in self.notifications:
+            # Calculate alpha based on remaining time
+            alpha = min(255, int(notif.remaining_time * 255 / 2))
+
+            # Draw background
+            bg_surface = pygame.Surface((self.width, line_height), pygame.SRCALPHA)
+            bg_surface.fill((30, 30, 40, alpha))
+            surface.blit(bg_surface, (self.x, y))
+
+            # Draw text
+            text_surf = font.render(notif.message, True, notif.color)
+            text_surf.set_alpha(alpha)
+            surface.blit(text_surf, (self.x + 5, y + 2))
+
+            y += line_height + 2
+
+
+from ..systems.building import STATION_UPGRADES, UPGRADE_COST_MULTIPLIER
+
+
+@dataclass
+class UpgradePanel(Panel):
+    """Panel for upgrading stations."""
+    station_id: UUID | None = None
+    station_type: StationType | None = None
+    available_upgrades: list = field(default_factory=list)
+    selected_index: int = -1
+    player_credits: float = 0.0
+    player_materials: dict = field(default_factory=dict)
+
+    def __init__(self, x: int, y: int) -> None:
+        super().__init__(
+            x=x, y=y, width=280, height=220, title="Upgrade Station [U]"
+        )
+        self.station_id = None
+        self.station_type = None
+        self.available_upgrades = []
+        self.selected_index = -1
+        self.player_credits = 0.0
+        self.player_materials = {}
+
+    def set_station(self, station_id: UUID | None, station_type: StationType | None) -> None:
+        """Set the station to show upgrades for."""
+        self.station_id = station_id
+        self.station_type = station_type
+        self.selected_index = -1
+
+        if station_type:
+            self.available_upgrades = STATION_UPGRADES.get(station_type, [])
+        else:
+            self.available_upgrades = []
+
+    def update_player_resources(self, credits: float, materials: dict) -> None:
+        """Update the player's available credits and materials."""
+        self.player_credits = credits
+        self.player_materials = materials
+
+    def can_afford_upgrade(self, target_type: StationType) -> bool:
+        """Check if player can afford an upgrade."""
+        # Check credits (60% of build cost)
+        base_cost = STATION_COSTS.get(target_type, float('inf'))
+        cost = base_cost * UPGRADE_COST_MULTIPLIER
+        if self.player_credits < cost:
+            return False
+
+        # Check materials
+        material_reqs = STATION_MATERIAL_COSTS.get(target_type, {})
+        for resource, needed in material_reqs.items():
+            if self.player_materials.get(resource, 0) < needed:
+                return False
+
+        return True
+
+    def select_option(self, index: int) -> StationType | None:
+        """Select an upgrade option by index."""
+        if 0 <= index < len(self.available_upgrades):
+            target_type = self.available_upgrades[index]
+            if self.can_afford_upgrade(target_type):
+                self.selected_index = index
+                return target_type
+        return None
+
+    def get_selected_type(self) -> StationType | None:
+        """Get the currently selected upgrade type."""
+        if 0 <= self.selected_index < len(self.available_upgrades):
+            return self.available_upgrades[self.selected_index]
+        return None
+
+    def draw(self, surface: pygame.Surface, font: pygame.font.Font) -> None:
+        """Draw the upgrade panel."""
+        if not self.visible:
+            return
+
+        super().draw(surface, font)
+
+        line_height = font.get_linesize()
+        y = self.y + 25
+
+        # Show current station type
+        if self.station_type:
+            type_text = f"Current: {self.station_type.value}"
+            type_surf = font.render(type_text, True, COLORS['ui_text'])
+            surface.blit(type_surf, (self.x + 10, y))
+        else:
+            no_station = "Select your station first"
+            no_surf = font.render(no_station, True, (255, 100, 100))
+            surface.blit(no_surf, (self.x + 10, y))
+        y += line_height + 2
+
+        # Show credits
+        credits_text = f"Credits: {self.player_credits:,.0f}"
+        credits_surf = font.render(credits_text, True, COLORS['ui_highlight'])
+        surface.blit(credits_surf, (self.x + 10, y))
+        y += line_height + 5
+
+        pygame.draw.line(
+            surface, self.border_color,
+            (self.x + 5, y), (self.x + self.width - 5, y), 1
+        )
+        y += 5
+
+        if not self.available_upgrades:
+            no_upgrades = "No upgrades available"
+            no_surf = font.render(no_upgrades, True, (150, 150, 150))
+            surface.blit(no_surf, (self.x + 10, y))
+            return
+
+        # Draw upgrade options
+        for i, target_type in enumerate(self.available_upgrades):
+            base_cost = STATION_COSTS.get(target_type, 0)
+            cost = base_cost * UPGRADE_COST_MULTIPLIER
+            material_reqs = STATION_MATERIAL_COSTS.get(target_type, {})
+            can_afford = self.can_afford_upgrade(target_type)
+            is_selected = i == self.selected_index
+
+            if is_selected:
+                color = COLORS['ui_highlight']
+                pygame.draw.rect(
+                    surface, (50, 50, 80),
+                    (self.x + 5, y - 2, self.width - 10, line_height + 2)
+                )
+            elif can_afford:
+                color = COLORS['ui_text']
+            else:
+                color = (100, 100, 100)
+
+            option_text = f"{i + 1}. {target_type.value}"
+            option_surf = font.render(option_text, True, color)
+            surface.blit(option_surf, (self.x + 10, y))
+
+            cost_text = f"{cost:,.0f}c"
+            cost_surf = font.render(cost_text, True, color)
+            surface.blit(cost_surf, (self.x + self.width - cost_surf.get_width() - 10, y))
+
+            y += line_height
+
+            if material_reqs:
+                mat_parts = []
+                for resource, amount in material_reqs.items():
+                    abbrev = resource.value[:3].upper()
+                    have = self.player_materials.get(resource, 0)
+                    mat_color = color if have >= amount else (255, 100, 100)
+                    mat_parts.append((f"{abbrev}:{amount:.0f}", mat_color))
+
+                x_offset = self.x + 25
+                for mat_text, mat_color in mat_parts:
+                    mat_surf = font.render(mat_text, True, mat_color)
+                    surface.blit(mat_surf, (x_offset, y))
+                    x_offset += mat_surf.get_width() + 8
+
+                y += line_height
+
+            y += 2
+
+        y += 5
+        pygame.draw.line(
+            surface, self.border_color,
+            (self.x + 5, y), (self.x + self.width - 5, y), 1
+        )
+        y += 5
+
+        hint_text = "Enter to confirm | ESC to cancel"
+        hint_surf = font.render(hint_text, True, (150, 150, 150))
+        surface.blit(hint_surf, (self.x + 10, y))
+
+
+@dataclass
+class PriceHistoryGraph(Panel):
+    """Panel showing price history for a resource."""
+    resource_type: ResourceType | None = None
+    price_history: list[float] = field(default_factory=list)
+    max_points: int = 100
+
+    def __init__(self, x: int, y: int) -> None:
+        super().__init__(
+            x=x, y=y, width=250, height=150, title="Price History"
+        )
+        self.price_history = []
+        self.resource_type = None
+
+    def set_resource(self, resource_type: ResourceType) -> None:
+        """Set the resource to track."""
+        if resource_type != self.resource_type:
+            self.resource_type = resource_type
+            self.price_history = []
+
+    def add_price(self, price: float) -> None:
+        """Add a price point."""
+        self.price_history.append(price)
+        if len(self.price_history) > self.max_points:
+            self.price_history.pop(0)
+
+    def draw(self, surface: pygame.Surface, font: pygame.font.Font) -> None:
+        """Draw the price history graph."""
+        if not self.visible:
+            return
+
+        super().draw(surface, font)
+
+        if not self.price_history or not self.resource_type:
+            no_data = font.render("Select a resource", True, COLORS['ui_text'])
+            surface.blit(no_data, (self.x + 10, self.y + 60))
+            return
+
+        # Draw resource name
+        res_text = f"Resource: {self.resource_type.value}"
+        res_surf = font.render(res_text, True, COLORS['ui_highlight'])
+        surface.blit(res_surf, (self.x + 10, self.y + 25))
+
+        # Graph area
+        graph_x = self.x + 10
+        graph_y = self.y + 45
+        graph_w = self.width - 20
+        graph_h = self.height - 70
+
+        # Draw graph background
+        pygame.draw.rect(surface, (20, 20, 30), (graph_x, graph_y, graph_w, graph_h))
+
+        if len(self.price_history) < 2:
+            return
+
+        # Find min/max for scaling
+        min_price = min(self.price_history)
+        max_price = max(self.price_history)
+        price_range = max_price - min_price
+        if price_range == 0:
+            price_range = 1
+
+        # Draw price line
+        points = []
+        for i, price in enumerate(self.price_history):
+            x = graph_x + (i * graph_w) / (len(self.price_history) - 1)
+            y = graph_y + graph_h - ((price - min_price) / price_range) * graph_h
+            points.append((x, y))
+
+        if len(points) >= 2:
+            pygame.draw.lines(surface, (100, 200, 100), False, points, 2)
+
+        # Draw current price
+        current_price = self.price_history[-1]
+        price_text = f"Current: {current_price:.1f}"
+        price_surf = font.render(price_text, True, COLORS['ui_text'])
+        surface.blit(price_surf, (self.x + 10, self.y + self.height - 20))
+
+
+@dataclass
+class TradeRoutePanel(Panel):
+    """Panel for setting up trade routes on ships."""
+    ship_id: UUID | None = None
+    ship_name: str = ""
+    waypoints: list = field(default_factory=list)  # List of (station_id, station_name, buy, sell)
+    selected_index: int = -1
+    available_stations: list = field(default_factory=list)  # For adding new waypoints
+    add_mode: bool = False  # True when selecting a station to add
+
+    def __init__(self, x: int, y: int) -> None:
+        super().__init__(
+            x=x, y=y, width=320, height=300, title="Trade Route [T]"
+        )
+        self.ship_id = None
+        self.ship_name = ""
+        self.waypoints = []
+        self.selected_index = -1
+        self.available_stations = []
+        self.add_mode = False
+
+    def set_ship(self, ship_id: UUID | None, ship_name: str = "") -> None:
+        """Set the ship to configure routes for."""
+        self.ship_id = ship_id
+        self.ship_name = ship_name
+        self.waypoints = []
+        self.selected_index = -1
+        self.add_mode = False
+
+    def set_waypoints(self, waypoints: list) -> None:
+        """Set the current waypoints list."""
+        self.waypoints = waypoints
+
+    def set_available_stations(self, stations: list) -> None:
+        """Set available stations for adding waypoints."""
+        self.available_stations = stations
+
+    def select_waypoint(self, index: int) -> None:
+        """Select a waypoint by index."""
+        if 0 <= index < len(self.waypoints):
+            self.selected_index = index
+            self.add_mode = False
+        elif self.add_mode and 0 <= index < len(self.available_stations):
+            self.selected_index = index
+
+    def toggle_add_mode(self) -> None:
+        """Toggle add waypoint mode."""
+        self.add_mode = not self.add_mode
+        self.selected_index = -1
+
+    def get_selected_station_to_add(self) -> tuple | None:
+        """Get the selected station when in add mode."""
+        if self.add_mode and 0 <= self.selected_index < len(self.available_stations):
+            return self.available_stations[self.selected_index]
+        return None
+
+    def draw(self, surface: pygame.Surface, font: pygame.font.Font) -> None:
+        """Draw the trade route panel."""
+        if not self.visible:
+            return
+
+        super().draw(surface, font)
+
+        line_height = font.get_linesize()
+        y = self.y + 25
+
+        # Ship name
+        if self.ship_name:
+            ship_text = f"Ship: {self.ship_name}"
+            ship_surf = font.render(ship_text, True, COLORS['ui_highlight'])
+            surface.blit(ship_surf, (self.x + 10, y))
+        else:
+            no_ship = "Select your ship first"
+            no_surf = font.render(no_ship, True, (255, 100, 100))
+            surface.blit(no_surf, (self.x + 10, y))
+        y += line_height + 5
+
+        pygame.draw.line(
+            surface, self.border_color,
+            (self.x + 5, y), (self.x + self.width - 5, y), 1
+        )
+        y += 5
+
+        if self.add_mode:
+            # Show available stations to add
+            add_text = "Select station to add:"
+            add_surf = font.render(add_text, True, COLORS['ui_text'])
+            surface.blit(add_surf, (self.x + 10, y))
+            y += line_height + 2
+
+            for i, (station_id, station_name) in enumerate(self.available_stations[:6]):
+                is_selected = i == self.selected_index
+                color = COLORS['ui_highlight'] if is_selected else COLORS['ui_text']
+                if is_selected:
+                    pygame.draw.rect(
+                        surface, (50, 50, 80),
+                        (self.x + 5, y - 2, self.width - 10, line_height + 2)
+                    )
+
+                opt_text = f"{i + 1}. {station_name}"
+                opt_surf = font.render(opt_text, True, color)
+                surface.blit(opt_surf, (self.x + 10, y))
+                y += line_height + 1
+
+            y += 5
+            hint_text = "Enter to add | ESC to cancel"
+            hint_surf = font.render(hint_text, True, (150, 150, 150))
+            surface.blit(hint_surf, (self.x + 10, y))
+
+        else:
+            # Show current waypoints
+            waypoints_text = f"Waypoints ({len(self.waypoints)}):"
+            wp_surf = font.render(waypoints_text, True, COLORS['ui_text'])
+            surface.blit(wp_surf, (self.x + 10, y))
+            y += line_height + 2
+
+            if not self.waypoints:
+                empty_text = "No waypoints set"
+                empty_surf = font.render(empty_text, True, (150, 150, 150))
+                surface.blit(empty_surf, (self.x + 20, y))
+                y += line_height
+            else:
+                for i, wp in enumerate(self.waypoints[:5]):
+                    station_name = wp.get('name', 'Unknown')
+                    is_selected = i == self.selected_index
+                    color = COLORS['ui_highlight'] if is_selected else COLORS['ui_text']
+
+                    if is_selected:
+                        pygame.draw.rect(
+                            surface, (50, 50, 80),
+                            (self.x + 5, y - 2, self.width - 10, line_height + 2)
+                        )
+
+                    wp_text = f"{i + 1}. {station_name[:20]}"
+                    wp_surf = font.render(wp_text, True, color)
+                    surface.blit(wp_surf, (self.x + 10, y))
+                    y += line_height + 1
+
+            y += 10
+            pygame.draw.line(
+                surface, self.border_color,
+                (self.x + 5, y), (self.x + self.width - 5, y), 1
+            )
+            y += 8
+
+            # Controls hint
+            controls = [
+                "A - Add waypoint",
+                "D - Delete selected",
+                "C - Clear all",
+            ]
+            for ctrl in controls:
+                ctrl_surf = font.render(ctrl, True, (150, 150, 150))
+                surface.blit(ctrl_surf, (self.x + 10, y))
+                y += line_height
+
+
+@dataclass
+class HelpPanel(Panel):
+    """Panel showing keyboard controls and help information."""
+    width: int = 400
+    height: int = 480
+    title: str = "Help - Keyboard Controls"
+
+    def draw(self, surface: pygame.Surface, font: pygame.font.Font) -> None:
+        """Draw the help panel."""
+        if not self.visible:
+            return
+
+        # Draw background with slight transparency effect
+        pygame.draw.rect(surface, self.bg_color, (self.x, self.y, self.width, self.height))
+        pygame.draw.rect(surface, self.border_color, (self.x, self.y, self.width, self.height), 2)
+
+        # Draw title
+        title_surf = font.render(self.title, True, COLORS['ui_highlight'])
+        surface.blit(title_surf, (self.x + 10, self.y + 8))
+
+        y = self.y + 35
+        line_height = 18
+
+        # Help sections
+        sections = [
+            ("CAMERA", [
+                ("W/A/S/D or Arrows", "Pan camera"),
+                ("Mouse Wheel", "Zoom in/out"),
+                ("Right Click + Drag", "Pan camera"),
+            ]),
+            ("SIMULATION", [
+                ("Space", "Pause/Resume"),
+                ("+/-", "Speed up/Slow down"),
+                ("Q", "Quit game"),
+            ]),
+            ("SELECTION", [
+                ("Left Click", "Select object"),
+                ("Escape", "Deselect / Cancel"),
+                ("Tab", "Toggle UI"),
+            ]),
+            ("BUILDING", [
+                ("B", "Open build menu"),
+                ("1-7", "Select station type"),
+                ("Left Click", "Place station"),
+                ("Enter", "Confirm placement"),
+            ]),
+            ("SHIPS", [
+                ("S", "Open ship purchase menu"),
+                ("1-5", "Select ship type"),
+                ("Enter", "Purchase ship"),
+            ]),
+            ("SHIPS & NAVIGATION", [
+                ("W", "Set waypoint (ship selected)"),
+                ("Click", "Choose destination"),
+            ]),
+            ("TRADE ROUTES", [
+                ("T", "Open trade manager"),
+                ("T (in menu)", "Create new route"),
+                ("1-8", "Select route & assign ship"),
+                ("D", "Delete selected route"),
+            ]),
+            ("OTHER", [
+                ("U", "Upgrade selected station"),
+                ("R", "Toggle trade route lines"),
+                ("F5", "Quick save"),
+                ("F9", "Quick load"),
+                ("H or F1", "Toggle this help"),
+            ]),
+        ]
+
+        for section_name, controls in sections:
+            # Section header
+            header_surf = font.render(section_name, True, COLORS['ui_highlight'])
+            surface.blit(header_surf, (self.x + 10, y))
+            y += line_height + 2
+
+            # Controls in section
+            for key, description in controls:
+                key_text = f"  {key}"
+                key_surf = font.render(key_text, True, (200, 200, 100))
+                surface.blit(key_surf, (self.x + 10, y))
+
+                desc_surf = font.render(description, True, COLORS['ui_text'])
+                surface.blit(desc_surf, (self.x + 160, y))
+                y += line_height
+
+            y += 5  # Space between sections
+
+        # Footer
+        y = self.y + self.height - 25
+        pygame.draw.line(
+            surface, self.border_color,
+            (self.x + 5, y - 5), (self.x + self.width - 5, y - 5), 1
+        )
+        footer_surf = font.render("Press H or F1 to close", True, (150, 150, 150))
+        surface.blit(footer_surf, (self.x + self.width // 2 - 70, y))
+
+
+@dataclass
+class ContextPrompt(Panel):
+    """Small contextual prompt panel that appears during modes."""
+    width: int = 300
+    height: int = 60
+    message: str = ""
+    hint: str = ""
+
+    def set_prompt(self, message: str, hint: str = "") -> None:
+        """Set the prompt message and hint."""
+        self.message = message
+        self.hint = hint
+
+    def draw(self, surface: pygame.Surface, font: pygame.font.Font) -> None:
+        """Draw the context prompt."""
+        if not self.visible or not self.message:
+            return
+
+        # Draw semi-transparent background
+        pygame.draw.rect(surface, (30, 30, 50), (self.x, self.y, self.width, self.height))
+        pygame.draw.rect(surface, COLORS['ui_highlight'], (self.x, self.y, self.width, self.height), 2)
+
+        # Draw message
+        msg_surf = font.render(self.message, True, COLORS['ui_highlight'])
+        surface.blit(msg_surf, (self.x + 10, self.y + 10))
+
+        # Draw hint
+        if self.hint:
+            hint_surf = font.render(self.hint, True, (150, 150, 150))
+            surface.blit(hint_surf, (self.x + 10, self.y + 35))
+
+
+@dataclass
+class TradeRouteManagerPanel(Panel):
+    """Panel for creating and managing trade routes between stations."""
+    width: int = 350
+    height: int = 400
+    title: str = "Trade Routes"
+
+    # Trade route creation state
+    routes: list[dict] = field(default_factory=list)  # [{id, name, station1, station2, ship_id}]
+    selected_route_index: int = -1
+
+    # Route creation mode
+    creating_route: bool = False
+    first_station_id: UUID | None = None
+    first_station_name: str = ""
+
+    # Ship assignment mode
+    assigning_ship: bool = False
+    route_to_assign: int = -1
+
+    # Available stations and ships
+    available_stations: list[tuple[UUID, str]] = field(default_factory=list)
+    available_ships: list[tuple[UUID, str]] = field(default_factory=list)
+
+    def start_route_creation(self) -> None:
+        """Start creating a new route - waiting for first station."""
+        self.creating_route = True
+        self.first_station_id = None
+        self.first_station_name = ""
+        self.assigning_ship = False
+
+    def set_first_station(self, station_id: UUID, station_name: str) -> None:
+        """Set the first station of the route being created."""
+        self.first_station_id = station_id
+        self.first_station_name = station_name
+
+    def complete_route(self, station_id: UUID, station_name: str) -> dict | None:
+        """Complete route creation with second station."""
+        if not self.first_station_id:
+            return None
+
+        route = {
+            'id': len(self.routes),
+            'name': f"{self.first_station_name} >> {station_name}",
+            'station1_id': self.first_station_id,
+            'station1_name': self.first_station_name,
+            'station2_id': station_id,
+            'station2_name': station_name,
+            'ship_id': None,
+            'ship_name': None,
+        }
+        self.routes.append(route)
+        self.creating_route = False
+        self.first_station_id = None
+        self.first_station_name = ""
+        return route
+
+    def cancel_creation(self) -> None:
+        """Cancel route creation."""
+        self.creating_route = False
+        self.first_station_id = None
+        self.first_station_name = ""
+        self.assigning_ship = False
+        self.route_to_assign = -1
+
+    def select_route(self, index: int) -> None:
+        """Select a route by index."""
+        if 0 <= index < len(self.routes):
+            self.selected_route_index = index
+            # Start ship assignment mode
+            self.assigning_ship = True
+            self.route_to_assign = index
+
+    def assign_ship(self, ship_id: UUID, ship_name: str) -> bool:
+        """Assign a ship to the selected route."""
+        if 0 <= self.route_to_assign < len(self.routes):
+            self.routes[self.route_to_assign]['ship_id'] = ship_id
+            self.routes[self.route_to_assign]['ship_name'] = ship_name
+            self.assigning_ship = False
+            self.route_to_assign = -1
+            return True
+        return False
+
+    def delete_selected_route(self) -> None:
+        """Delete the selected route."""
+        if 0 <= self.selected_route_index < len(self.routes):
+            del self.routes[self.selected_route_index]
+            self.selected_route_index = -1
+            # Renumber remaining routes
+            for i, route in enumerate(self.routes):
+                route['id'] = i
+
+    def set_available_stations(self, stations: list[tuple[UUID, str]]) -> None:
+        """Set available stations for route creation."""
+        self.available_stations = stations
+
+    def set_available_ships(self, ships: list[tuple[UUID, str]]) -> None:
+        """Set available ships for assignment."""
+        self.available_ships = ships
+
+    def get_current_prompt(self) -> tuple[str, str]:
+        """Get current mode's prompt message and hint."""
+        if self.assigning_ship:
+            route = self.routes[self.route_to_assign] if 0 <= self.route_to_assign < len(self.routes) else None
+            if route:
+                return f"Assign ship to: {route['name']}", "Click a ship or press 1-5 to select"
+        elif self.creating_route:
+            if self.first_station_id:
+                return f"Select destination: {self.first_station_name} >> ?", "Click second station or press Escape to cancel"
+            else:
+                return "Select first station for route", "Click a station or press Escape to cancel"
+        return "", ""
+
+    def draw(self, surface: pygame.Surface, font: pygame.font.Font) -> None:
+        """Draw the trade route manager panel."""
+        if not self.visible:
+            return
+
+        # Draw background
+        pygame.draw.rect(surface, self.bg_color, (self.x, self.y, self.width, self.height))
+        pygame.draw.rect(surface, self.border_color, (self.x, self.y, self.width, self.height), 2)
+
+        # Draw title
+        title_surf = font.render(self.title, True, COLORS['ui_highlight'])
+        surface.blit(title_surf, (self.x + 10, self.y + 8))
+
+        y = self.y + 35
+        line_height = 20
+
+        if self.assigning_ship:
+            # Ship assignment mode
+            prompt = f"Assign ship to route:"
+            prompt_surf = font.render(prompt, True, COLORS['ui_text'])
+            surface.blit(prompt_surf, (self.x + 10, y))
+            y += line_height + 5
+
+            if 0 <= self.route_to_assign < len(self.routes):
+                route = self.routes[self.route_to_assign]
+                route_surf = font.render(route['name'], True, COLORS['ui_highlight'])
+                surface.blit(route_surf, (self.x + 20, y))
+                y += line_height + 10
+
+            # Show available ships
+            ships_header = font.render("Available Ships:", True, COLORS['ui_text'])
+            surface.blit(ships_header, (self.x + 10, y))
+            y += line_height + 2
+
+            for i, (ship_id, ship_name) in enumerate(self.available_ships[:5]):
+                ship_text = f"{i + 1}. {ship_name[:25]}"
+                ship_surf = font.render(ship_text, True, COLORS['ui_text'])
+                surface.blit(ship_surf, (self.x + 20, y))
+                y += line_height
+
+            y += 10
+            hint = font.render("Press 1-5 to select, Escape to cancel", True, (150, 150, 150))
+            surface.blit(hint, (self.x + 10, y))
+
+        elif self.creating_route:
+            # Route creation mode
+            if self.first_station_id:
+                msg = f"First station: {self.first_station_name}"
+                msg_surf = font.render(msg, True, COLORS['ui_text'])
+                surface.blit(msg_surf, (self.x + 10, y))
+                y += line_height + 5
+
+                hint = font.render("Press T + click second station", True, COLORS['ui_highlight'])
+                surface.blit(hint, (self.x + 10, y))
+            else:
+                hint = font.render("Press T + click first station", True, COLORS['ui_highlight'])
+                surface.blit(hint, (self.x + 10, y))
+
+            y += line_height + 10
+            cancel = font.render("Press Escape to cancel", True, (150, 150, 150))
+            surface.blit(cancel, (self.x + 10, y))
+
+        else:
+            # Normal mode - show existing routes
+            if not self.routes:
+                no_routes = font.render("No trade routes defined", True, (150, 150, 150))
+                surface.blit(no_routes, (self.x + 10, y))
+                y += line_height + 10
+            else:
+                routes_header = font.render("Routes:", True, COLORS['ui_text'])
+                surface.blit(routes_header, (self.x + 10, y))
+                y += line_height + 2
+
+                for i, route in enumerate(self.routes[:8]):
+                    is_selected = i == self.selected_route_index
+                    color = COLORS['ui_highlight'] if is_selected else COLORS['ui_text']
+
+                    if is_selected:
+                        pygame.draw.rect(
+                            surface, (50, 50, 80),
+                            (self.x + 5, y - 2, self.width - 10, line_height + 2)
+                        )
+
+                    # Route number and name
+                    route_text = f"{i + 1}. {route['name'][:30]}"
+                    route_surf = font.render(route_text, True, color)
+                    surface.blit(route_surf, (self.x + 10, y))
+                    y += line_height
+
+                    # Show assigned ship if any
+                    if route.get('ship_name'):
+                        ship_text = f"   Ship: {route['ship_name'][:25]}"
+                        ship_surf = font.render(ship_text, True, (100, 200, 100))
+                        surface.blit(ship_surf, (self.x + 10, y))
+                    else:
+                        ship_text = "   No ship assigned"
+                        ship_surf = font.render(ship_text, True, (150, 100, 100))
+                        surface.blit(ship_surf, (self.x + 10, y))
+                    y += line_height + 5
+
+            # Controls
+            y = self.y + self.height - 80
+            pygame.draw.line(
+                surface, self.border_color,
+                (self.x + 5, y), (self.x + self.width - 5, y), 1
+            )
+            y += 8
+
+            controls = [
+                "T - Create new route",
+                "1-8 - Select route & assign ship",
+                "D - Delete selected route",
+                "Escape - Close",
+            ]
+            for ctrl in controls:
+                ctrl_surf = font.render(ctrl, True, (150, 150, 150))
+                surface.blit(ctrl_surf, (self.x + 10, y))
+                y += line_height - 2

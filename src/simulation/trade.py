@@ -34,6 +34,56 @@ class TradeRoute:
 
 
 @dataclass
+class Waypoint:
+    """A waypoint in a manual trade route."""
+    station_id: UUID
+    station_name: str = ""
+    buy_resource: ResourceType | None = None  # What to buy here
+    sell_resource: ResourceType | None = None  # What to sell here
+
+
+@dataclass
+class ManualRoute(Component):
+    """Player-configured trade route with waypoints."""
+    waypoints: list[Waypoint] = field(default_factory=list)
+    current_waypoint_index: int = 0
+    loop: bool = True  # Loop back to start when done
+
+    def get_current_waypoint(self) -> Waypoint | None:
+        """Get the current waypoint."""
+        if not self.waypoints:
+            return None
+        if self.current_waypoint_index >= len(self.waypoints):
+            if self.loop:
+                self.current_waypoint_index = 0
+            else:
+                return None
+        return self.waypoints[self.current_waypoint_index]
+
+    def advance_waypoint(self) -> None:
+        """Move to the next waypoint."""
+        self.current_waypoint_index += 1
+        if self.loop and self.current_waypoint_index >= len(self.waypoints):
+            self.current_waypoint_index = 0
+
+    def add_waypoint(self, station_id: UUID, station_name: str = "") -> None:
+        """Add a waypoint to the route."""
+        self.waypoints.append(Waypoint(station_id=station_id, station_name=station_name))
+
+    def remove_waypoint(self, index: int) -> None:
+        """Remove a waypoint by index."""
+        if 0 <= index < len(self.waypoints):
+            self.waypoints.pop(index)
+            if self.current_waypoint_index >= len(self.waypoints):
+                self.current_waypoint_index = max(0, len(self.waypoints) - 1)
+
+    def clear(self) -> None:
+        """Clear all waypoints."""
+        self.waypoints.clear()
+        self.current_waypoint_index = 0
+
+
+@dataclass
 class Trader(Component):
     """Component for entities that can trade."""
     current_route: TradeRoute | None = None

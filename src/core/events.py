@@ -83,6 +83,24 @@ class StationBuiltEvent(Event):
     cost: float
 
 
+@dataclass
+class ShipPurchasedEvent(Event):
+    """Fired when a ship is purchased."""
+    ship_id: UUID
+    faction_id: UUID
+    ship_type: str  # ShipType.value
+    shipyard_id: UUID
+    cost: float
+
+
+@dataclass
+class NotificationEvent(Event):
+    """Fired for UI notifications."""
+    message: str
+    notification_type: str = "info"  # info, success, warning, error
+    duration: float = 5.0  # How long to display (seconds)
+
+
 EventHandler = Callable[[Event], None]
 
 

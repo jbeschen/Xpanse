@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 from ..core.ecs import Component, Entity
 from ..core.world import World
 from ..solar_system.bodies import CelestialBodyData, BodyType, SOLAR_SYSTEM_DATA
-from ..solar_system.orbits import Position, Orbit
+from ..solar_system.orbits import Position, Orbit, ParentBody
 from ..simulation.resources import ResourceDeposit
 
 if TYPE_CHECKING:
@@ -56,13 +56,35 @@ def create_celestial_body(
     # Add position (will be updated by orbital system)
     em.add_component(entity, Position(x=data.semi_major_axis, y=0.0))
 
-    # Add orbit if it has a parent
+    # Add orbit or parent body relationship
     if data.parent:
-        em.add_component(entity, Orbit(
-            parent_name=data.parent,
-            semi_major_axis=data.semi_major_axis,
-            orbital_period=data.orbital_period,
-        ))
+        if data.body_type == BodyType.MOON:
+            # Moons stay at fixed offset from parent (no orbiting)
+            # Count existing moons of this parent to determine position in list
+            moon_index = 0
+            for existing_entity, existing_body in em.get_all_components(CelestialBody):
+                if existing_body.body_type == BodyType.MOON:
+                    existing_parent = em.get_component(existing_entity, ParentBody)
+                    if existing_parent and existing_parent.parent_name == data.parent:
+                        moon_index += 1
+
+            # Position moons in a diagonal list trailing the planet
+            # Use consistent small offsets so moons appear near parent
+            offset_x = 0.05 + (moon_index * 0.03)  # Spread horizontally
+            offset_y = 0.02 + (moon_index * 0.03)  # Spread vertically
+
+            em.add_component(entity, ParentBody(
+                parent_name=data.parent,
+                offset_x=offset_x,
+                offset_y=offset_y,
+            ))
+        else:
+            # Planets and other bodies orbit
+            em.add_component(entity, Orbit(
+                parent_name=data.parent,
+                semi_major_axis=data.semi_major_axis,
+                orbital_period=data.orbital_period,
+            ))
 
     # Add resource deposits
     for resource_type, richness in data.resources:

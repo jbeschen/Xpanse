@@ -7,7 +7,7 @@ from uuid import UUID
 
 from ..core.ecs import Component, Entity
 from ..core.world import World
-from ..solar_system.orbits import Position
+from ..solar_system.orbits import Position, ParentBody
 from ..simulation.resources import ResourceType, Inventory
 from ..simulation.economy import Market
 from ..simulation.production import Producer, Extractor, RECIPES
@@ -152,8 +152,27 @@ def create_station(
         owner_faction_id=owner_faction_id,
     ))
 
-    # Add position
+    # Add position (will be updated by OrbitalSystem if parent_body is set)
     em.add_component(entity, Position(x=position[0], y=position[1]))
+
+    # Add parent body relationship to lock station to celestial body
+    if parent_body:
+        # Count existing stations around this body to determine offset
+        station_index = 0
+        for existing_entity, existing_station in em.get_all_components(Station):
+            if existing_entity.id != entity.id and existing_station.parent_body == parent_body:
+                station_index += 1
+
+        # Stations appear in a vertical list below the parent body
+        # Small fixed offsets - stations are tiny compared to celestial bodies
+        offset_x = 0.02 + (station_index * 0.01)  # Slight horizontal spread
+        offset_y = 0.03 + (station_index * 0.02)  # Vertical list going down
+
+        em.add_component(entity, ParentBody(
+            parent_name=parent_body,
+            offset_x=offset_x,
+            offset_y=offset_y,
+        ))
 
     # Add inventory
     inventory = Inventory(capacity=config["capacity"])

@@ -17,9 +17,11 @@ class GameTime:
     day: int = 1
     year: int = 2150
 
-    # Time scale: 1 real second = ~30 game days (1/12 year) at 1x speed
-    # This makes a full year pass in ~12 seconds at 1x speed
-    DAYS_PER_REAL_SECOND: float = 30.0  # ~1 month per second
+    # Time scale: base rate that gets multiplied by speed setting
+    # At 1x speed: 1 real second = 1 game day
+    # At default 10x speed: 1 real second = 10 game days (~1/3 month)
+    # Can go up to 100x for fast-forward
+    DAYS_PER_REAL_SECOND: float = 1.0  # Base rate, multiplied by speed
     DAYS_PER_YEAR: int = 365
 
     def advance(self, dt: float, speed: float = 1.0) -> None:
@@ -54,7 +56,7 @@ class World:
         self.game_time = GameTime()
         self._systems: list[System] = []
         self._paused: bool = False
-        self._speed: float = 1.0
+        self._speed: float = 10.0  # Default to 10x speed (10 days/second)
 
     def add_system(self, system: System) -> None:
         """Add a system to the world."""
@@ -134,8 +136,8 @@ class World:
 
     @speed.setter
     def speed(self, value: float) -> None:
-        """Set simulation speed (clamped 0.1 to 10.0)."""
-        self._speed = max(0.1, min(10.0, value))
+        """Set simulation speed (clamped 1 to 100)."""
+        self._speed = max(1.0, min(100.0, value))
 
     def get_entity(self, entity_id: UUID) -> Entity | None:
         """Get an entity by ID."""

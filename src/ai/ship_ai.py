@@ -11,8 +11,9 @@ from ..core.events import EventBus, ShipArrivedEvent
 from ..entities.ships import Ship
 from ..entities.stations import Station
 from ..solar_system.orbits import Position, NavigationTarget
-from ..simulation.trade import Trader, TradeState, CargoHold, notify_ship_arrived
+from ..simulation.trade import Trader, TradeState, CargoHold, ManualRoute, notify_ship_arrived
 from ..simulation.economy import Market
+from ..simulation.resources import Inventory
 
 if TYPE_CHECKING:
     pass
@@ -77,6 +78,7 @@ class ShipAI(System):
         pos = entity_manager.get_component(ship_entity, Position)
         nav = entity_manager.get_component(ship_entity, NavigationTarget)
         trader = entity_manager.get_component(ship_entity, Trader)
+        manual_route = entity_manager.get_component(ship_entity, ManualRoute)
 
         if not pos:
             return
@@ -92,8 +94,11 @@ class ShipAI(System):
             # Remove navigation target once arrived
             entity_manager.remove_component(ship_entity, NavigationTarget)
 
+            # If following manual route, advance to next waypoint
+            if manual_route and manual_route.waypoints:
+                self._handle_manual_route_arrival(ship_entity, manual_route, entity_manager)
             # Notify trader of arrival
-            if trader:
+            elif trader:
                 notify_ship_arrived(trader)
             return
 
@@ -101,8 +106,11 @@ class ShipAI(System):
         if nav:
             return
 
-        # Decide on next action based on behavior
-        if trader:
+        # Check for manual route first
+        if manual_route and manual_route.waypoints:
+            self._handle_manual_route(ship_entity, ship, manual_route, entity_manager, state)
+        # Otherwise use automatic trading behavior
+        elif trader:
             self._handle_trading_behavior(ship_entity, ship, trader, entity_manager, state)
         else:
             self._handle_idle_behavior(ship_entity, ship, entity_manager, state)
@@ -124,6 +132,75 @@ class ShipAI(System):
 
         # Small wait before next action
         state.wait_time = 2.0
+
+    def _handle_manual_route(
+        self,
+        ship_entity: Entity,
+        ship: Ship,
+        manual_route: ManualRoute,
+        entity_manager: EntityManager,
+        state: ShipAIState
+    ) -> None:
+        """Handle ship following a manual route."""
+        waypoint = manual_route.get_current_waypoint()
+        if not waypoint:
+            return
+
+        # Find the target station
+        target = entity_manager.get_entity(waypoint.station_id)
+        if not target:
+            # Station no longer exists, skip to next waypoint
+            manual_route.advance_waypoint()
+            return
+
+        target_pos = entity_manager.get_component(target, Position)
+        if not target_pos:
+            return
+
+        # Navigate to waypoint
+        state.target_entity_id = target.id
+        entity_manager.add_component(ship_entity, NavigationTarget(
+            target_x=target_pos.x,
+            target_y=target_pos.y,
+            max_speed=ship.max_speed,
+            acceleration=ship.acceleration,
+        ))
+
+    def _handle_manual_route_arrival(
+        self,
+        ship_entity: Entity,
+        manual_route: ManualRoute,
+        entity_manager: EntityManager
+    ) -> None:
+        """Handle arrival at a manual route waypoint."""
+        waypoint = manual_route.get_current_waypoint()
+        if not waypoint:
+            return
+
+        cargo = entity_manager.get_component(ship_entity, CargoHold)
+        if cargo:
+            station = entity_manager.get_entity(waypoint.station_id)
+            if station:
+                station_inv = entity_manager.get_component(station, Inventory)
+                station_market = entity_manager.get_component(station, Market)
+
+                # Execute sell order if configured
+                if waypoint.sell_resource and station_inv:
+                    sell_amount = cargo.get_cargo(waypoint.sell_resource)
+                    if sell_amount > 0:
+                        removed = cargo.remove_cargo(waypoint.sell_resource, sell_amount)
+                        station_inv.add(waypoint.sell_resource, removed)
+
+                # Execute buy order if configured
+                if waypoint.buy_resource and station_inv:
+                    available = station_inv.get(waypoint.buy_resource)
+                    buy_amount = min(available, cargo.free_space)
+                    if buy_amount > 0:
+                        removed = station_inv.remove(waypoint.buy_resource, buy_amount)
+                        cargo.add_cargo(waypoint.buy_resource, removed)
+
+        # Advance to next waypoint
+        manual_route.advance_waypoint()
 
     def _handle_trading_behavior(
         self,
@@ -166,7 +243,8 @@ class ShipAI(System):
         entity_manager.add_component(ship_entity, NavigationTarget(
             target_x=target_pos.x,
             target_y=target_pos.y,
-            speed=ship.max_speed,
+            max_speed=ship.max_speed,
+            acceleration=ship.acceleration,
         ))
 
     def _handle_idle_behavior(
@@ -204,7 +282,8 @@ class ShipAI(System):
                 entity_manager.add_component(ship_entity, NavigationTarget(
                     target_x=station_pos.x,
                     target_y=station_pos.y,
-                    speed=ship.max_speed,
+                    max_speed=ship.max_speed,
+                    acceleration=ship.acceleration,
                 ))
 
 

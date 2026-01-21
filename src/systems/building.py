@@ -1,4 +1,4 @@
-"""Building system for station construction."""
+"""Building system for station construction and ship purchasing."""
 from __future__ import annotations
 import math
 from dataclasses import dataclass
@@ -11,6 +11,7 @@ from ..entities.stations import (
     Station, StationType, STATION_CONFIGS,
     create_station, create_mining_station
 )
+from ..entities.ships import Ship, ShipType, create_ship, SHIP_CONFIGS
 from ..entities.factions import Faction
 from ..solar_system.orbits import Position
 from ..simulation.resources import ResourceType
@@ -30,45 +31,115 @@ STATION_COSTS: dict[StationType, float] = {
     StationType.TRADE_HUB: 200000,
 }
 
-# Station material requirements (tier 2+ stations need materials)
-# Tier 1 (basic): just credits
-# Tier 2 (intermediate): credits + tier 1 processed materials
-# Tier 3 (advanced): credits + tier 2 advanced materials
+# Station material requirements - each tier only needs materials from LOWER tiers
+# Production chain: Mining → Refinery → Factory → Advanced stations
+#
+# Tier 0 (Raw): Iron Ore, Silicates, Water Ice, Rare Earths, Helium-3
+# Tier 1 (Basic): Refined Metal, Silicon, Water, Fuel (made by Refinery)
+# Tier 2 (Advanced): Electronics, Machinery, Life Support (made by Factory)
+#
 STATION_MATERIAL_COSTS: dict[StationType, dict[ResourceType, float]] = {
-    # Tier 1 - no materials required
+    # Bootstrap tier - credits only (needed to start the production chain)
     StationType.OUTPOST: {},
     StationType.MINING_STATION: {},
 
-    # Tier 2 - requires tier 1 processed materials
+    # Tier 1 stations - need RAW materials (from Mining Stations)
     StationType.REFINERY: {
-        ResourceType.REFINED_METAL: 50,
-        ResourceType.SILICON: 20,
-    },
-    StationType.FACTORY: {
-        ResourceType.REFINED_METAL: 100,
-        ResourceType.ELECTRONICS: 20,
+        ResourceType.IRON_ORE: 100,
+        ResourceType.SILICATES: 50,
     },
 
-    # Tier 3 - requires tier 2 advanced materials
+    # Tier 2 stations - need BASIC materials (from Refineries)
+    StationType.FACTORY: {
+        ResourceType.REFINED_METAL: 100,
+        ResourceType.SILICON: 50,
+    },
+
+    # Tier 3 stations - need ADVANCED materials (from Factories)
     StationType.COLONY: {
-        ResourceType.MACHINERY: 50,
-        ResourceType.LIFE_SUPPORT: 100,
         ResourceType.ELECTRONICS: 50,
+        ResourceType.MACHINERY: 30,
+        ResourceType.LIFE_SUPPORT: 50,
     },
     StationType.SHIPYARD: {
-        ResourceType.MACHINERY: 100,
+        ResourceType.REFINED_METAL: 100,
         ResourceType.ELECTRONICS: 50,
-        ResourceType.REFINED_METAL: 200,
+        ResourceType.MACHINERY: 50,
     },
     StationType.TRADE_HUB: {
         ResourceType.ELECTRONICS: 100,
         ResourceType.MACHINERY: 50,
-        ResourceType.LIFE_SUPPORT: 50,
+        ResourceType.REFINED_METAL: 100,
     },
 }
 
 # Minimum distance between stations in AU
 MIN_STATION_DISTANCE = 0.1
+
+# Maximum distance from ship to allow building
+MAX_BUILD_DISTANCE = 0.15  # AU
+
+# Station upgrade paths: what each station type can upgrade to
+STATION_UPGRADES: dict[StationType, list[StationType]] = {
+    StationType.OUTPOST: [
+        StationType.MINING_STATION,
+        StationType.REFINERY,
+        StationType.COLONY,
+    ],
+    StationType.MINING_STATION: [
+        StationType.REFINERY,
+    ],
+    StationType.REFINERY: [
+        StationType.FACTORY,
+    ],
+    StationType.FACTORY: [
+        StationType.SHIPYARD,
+        StationType.TRADE_HUB,
+    ],
+    StationType.COLONY: [
+        StationType.TRADE_HUB,
+    ],
+    StationType.SHIPYARD: [],  # No upgrades
+    StationType.TRADE_HUB: [],  # No upgrades
+}
+
+# Upgrade costs (percentage of full build cost)
+UPGRADE_COST_MULTIPLIER = 0.6  # Upgrades cost 60% of full station price
+
+
+# Ship costs (credits)
+SHIP_COSTS: dict[ShipType, float] = {
+    ShipType.SHUTTLE: 5000,
+    ShipType.FREIGHTER: 15000,
+    ShipType.TANKER: 25000,
+    ShipType.BULK_HAULER: 50000,
+    ShipType.MINING_SHIP: 30000,
+}
+
+# Ship material requirements
+SHIP_MATERIAL_COSTS: dict[ShipType, dict[ResourceType, float]] = {
+    ShipType.SHUTTLE: {
+        ResourceType.REFINED_METAL: 20,
+    },
+    ShipType.FREIGHTER: {
+        ResourceType.REFINED_METAL: 50,
+        ResourceType.ELECTRONICS: 10,
+    },
+    ShipType.TANKER: {
+        ResourceType.REFINED_METAL: 80,
+        ResourceType.ELECTRONICS: 15,
+    },
+    ShipType.BULK_HAULER: {
+        ResourceType.REFINED_METAL: 150,
+        ResourceType.ELECTRONICS: 30,
+        ResourceType.MACHINERY: 20,
+    },
+    ShipType.MINING_SHIP: {
+        ResourceType.REFINED_METAL: 60,
+        ResourceType.ELECTRONICS: 20,
+        ResourceType.MACHINERY: 30,
+    },
+}
 
 
 @dataclass
@@ -160,6 +231,11 @@ class BuildingSystem(System):
             if missing:
                 missing_str = ", ".join(f"{r.value}: {a:.0f}" for r, a in missing.items())
                 return BuildResult(False, f"Missing materials: {missing_str}")
+
+        # Check for nearby ship owned by faction
+        ship_nearby, ship_msg = self._check_ship_nearby(position, faction_id, em)
+        if not ship_nearby:
+            return BuildResult(False, ship_msg)
 
         # Check distance from other stations
         valid, msg = self._validate_position(position, em)
@@ -313,6 +389,80 @@ class BuildingSystem(System):
 
         return True, "Valid position"
 
+    def _check_ship_nearby(
+        self,
+        position: tuple[float, float],
+        faction_id: UUID,
+        entity_manager: EntityManager
+    ) -> tuple[bool, str]:
+        """Check if a faction-owned ship is near the build position.
+
+        Args:
+            position: (x, y) position to check
+            faction_id: Faction ID that must own the ship
+            entity_manager: Entity manager
+
+        Returns:
+            (valid, message) tuple
+        """
+        px, py = position
+
+        for entity, ship in entity_manager.get_all_components(Ship):
+            # Check if ship belongs to faction
+            if ship.owner_faction_id != faction_id:
+                continue
+
+            pos = entity_manager.get_component(entity, Position)
+            if not pos:
+                continue
+
+            dx = pos.x - px
+            dy = pos.y - py
+            distance = math.sqrt(dx * dx + dy * dy)
+
+            if distance <= MAX_BUILD_DISTANCE:
+                return True, f"Ship {entity.name} is nearby"
+
+        return False, f"No ship nearby - send a ship to this location first (within {MAX_BUILD_DISTANCE} AU)"
+
+    def find_nearest_faction_ship(
+        self,
+        position: tuple[float, float],
+        faction_id: UUID,
+        entity_manager: EntityManager
+    ) -> tuple[str | None, float]:
+        """Find the nearest faction-owned ship to a position.
+
+        Args:
+            position: (x, y) position in AU
+            faction_id: Faction to check
+            entity_manager: Entity manager
+
+        Returns:
+            (ship_name, distance) tuple, or (None, inf) if no ships
+        """
+        px, py = position
+        nearest_name = None
+        nearest_dist = float('inf')
+
+        for entity, ship in entity_manager.get_all_components(Ship):
+            if ship.owner_faction_id != faction_id:
+                continue
+
+            pos = entity_manager.get_component(entity, Position)
+            if not pos:
+                continue
+
+            dx = pos.x - px
+            dy = pos.y - py
+            distance = math.sqrt(dx * dx + dy * dy)
+
+            if distance < nearest_dist:
+                nearest_dist = distance
+                nearest_name = entity.name
+
+        return nearest_name, nearest_dist
+
     def _generate_station_name(
         self,
         station_type: StationType,
@@ -378,6 +528,265 @@ class BuildingSystem(System):
     def get_material_cost(self, station_type: StationType) -> dict[ResourceType, float]:
         """Get the material requirements for a station type."""
         return STATION_MATERIAL_COSTS.get(station_type, {})
+
+    def purchase_ship(
+        self,
+        world: "World",
+        faction_id: UUID,
+        ship_type: ShipType,
+        shipyard_id: UUID,
+    ) -> BuildResult:
+        """Purchase a ship from a shipyard.
+
+        Args:
+            world: The game world
+            faction_id: ID of the faction purchasing
+            ship_type: Type of ship to purchase
+            shipyard_id: ID of the shipyard to build at
+
+        Returns:
+            BuildResult indicating success/failure
+        """
+        from ..simulation.resources import Inventory
+
+        em = world.entity_manager
+
+        # Find faction
+        faction_entity = None
+        faction_comp = None
+        for entity, faction in em.get_all_components(Faction):
+            if entity.id == faction_id:
+                faction_entity = entity
+                faction_comp = faction
+                break
+
+        if not faction_comp:
+            return BuildResult(False, "Faction not found")
+
+        # Find shipyard and verify it's owned by faction
+        shipyard_entity = em.get_entity(shipyard_id)
+        if not shipyard_entity:
+            return BuildResult(False, "Shipyard not found")
+
+        station = em.get_component(shipyard_entity, Station)
+        if not station or station.station_type != StationType.SHIPYARD:
+            return BuildResult(False, "Not a shipyard")
+
+        if station.owner_faction_id != faction_id:
+            return BuildResult(False, "You don't own this shipyard")
+
+        # Check credit cost
+        cost = SHIP_COSTS.get(ship_type, 0)
+        if faction_comp.credits < cost:
+            return BuildResult(
+                False,
+                f"Insufficient credits: need {cost:.0f}, have {faction_comp.credits:.0f}"
+            )
+
+        # Check material requirements
+        material_reqs = SHIP_MATERIAL_COSTS.get(ship_type, {})
+        if material_reqs:
+            faction_inventories = self._get_faction_inventories(faction_id, em)
+            missing = self._check_material_availability(material_reqs, faction_inventories)
+            if missing:
+                missing_str = ", ".join(f"{r.value}: {a:.0f}" for r, a in missing.items())
+                return BuildResult(False, f"Missing materials: {missing_str}")
+
+        # Get shipyard position for ship spawn
+        shipyard_pos = em.get_component(shipyard_entity, Position)
+        if not shipyard_pos:
+            return BuildResult(False, "Shipyard has no position")
+
+        # Deduct credits
+        faction_comp.credits -= cost
+
+        # Deduct materials
+        if material_reqs:
+            faction_inventories = self._get_faction_inventories(faction_id, em)
+            self._consume_materials(material_reqs, faction_inventories)
+
+        # Create ship near shipyard
+        ship_position = (shipyard_pos.x + 0.02, shipyard_pos.y + 0.02)
+        ship_name = f"{faction_entity.name} {ship_type.value.replace('_', ' ').title()}"
+
+        ship_entity = create_ship(
+            world=world,
+            name=ship_name,
+            ship_type=ship_type,
+            position=ship_position,
+            owner_faction_id=faction_id,
+            is_trader=True,
+        )
+
+        # Fire event
+        from ..core.events import ShipPurchasedEvent
+        self.event_bus.publish(ShipPurchasedEvent(
+            ship_id=ship_entity.id,
+            faction_id=faction_id,
+            ship_type=ship_type.value,
+            shipyard_id=shipyard_id,
+            cost=cost,
+        ))
+
+        if material_reqs:
+            mat_str = ", ".join(f"{r.value}: {a:.0f}" for r, a in material_reqs.items())
+            return BuildResult(
+                True,
+                f"Purchased {ship_type.value} for {cost:.0f} credits + {mat_str}",
+                ship_entity.id
+            )
+
+        return BuildResult(
+            True,
+            f"Purchased {ship_type.value} for {cost:.0f} credits",
+            ship_entity.id
+        )
+
+    def get_ship_cost(self, ship_type: ShipType) -> float:
+        """Get the credit cost of a ship type."""
+        return SHIP_COSTS.get(ship_type, 0)
+
+    def get_ship_material_cost(self, ship_type: ShipType) -> dict[ResourceType, float]:
+        """Get the material requirements for a ship type."""
+        return SHIP_MATERIAL_COSTS.get(ship_type, {})
+
+    def get_available_upgrades(self, station_type: StationType) -> list[StationType]:
+        """Get list of station types this station can upgrade to."""
+        return STATION_UPGRADES.get(station_type, [])
+
+    def get_upgrade_cost(self, target_type: StationType) -> float:
+        """Get the credit cost to upgrade to a station type."""
+        base_cost = STATION_COSTS.get(target_type, 0)
+        return base_cost * UPGRADE_COST_MULTIPLIER
+
+    def get_upgrade_material_cost(self, target_type: StationType) -> dict[ResourceType, float]:
+        """Get the material cost to upgrade to a station type (same as building)."""
+        return STATION_MATERIAL_COSTS.get(target_type, {})
+
+    def upgrade_station(
+        self,
+        world: "World",
+        faction_id: UUID,
+        station_id: UUID,
+        target_type: StationType,
+    ) -> BuildResult:
+        """Upgrade a station to a new type.
+
+        Args:
+            world: The game world
+            faction_id: ID of the faction requesting the upgrade
+            station_id: ID of the station to upgrade
+            target_type: Station type to upgrade to
+
+        Returns:
+            BuildResult indicating success/failure
+        """
+        from ..simulation.resources import Inventory
+        from ..core.events import StationBuiltEvent
+
+        em = world.entity_manager
+
+        # Find faction
+        faction_entity = None
+        faction_comp = None
+        for entity, faction in em.get_all_components(Faction):
+            if entity.id == faction_id:
+                faction_entity = entity
+                faction_comp = faction
+                break
+
+        if not faction_comp:
+            return BuildResult(False, "Faction not found")
+
+        # Find station
+        station_entity = em.get_entity(station_id)
+        if not station_entity:
+            return BuildResult(False, "Station not found")
+
+        station = em.get_component(station_entity, Station)
+        if not station:
+            return BuildResult(False, "Not a station")
+
+        # Verify ownership
+        if station.owner_faction_id != faction_id:
+            return BuildResult(False, "You don't own this station")
+
+        # Check if upgrade is valid
+        available_upgrades = self.get_available_upgrades(station.station_type)
+        if target_type not in available_upgrades:
+            return BuildResult(
+                False,
+                f"Cannot upgrade {station.station_type.value} to {target_type.value}"
+            )
+
+        # Check credits
+        cost = self.get_upgrade_cost(target_type)
+        if faction_comp.credits < cost:
+            return BuildResult(
+                False,
+                f"Insufficient credits: need {cost:.0f}, have {faction_comp.credits:.0f}"
+            )
+
+        # Check materials
+        material_reqs = self.get_upgrade_material_cost(target_type)
+        if material_reqs:
+            faction_inventories = self._get_faction_inventories(faction_id, em)
+            missing = self._check_material_availability(material_reqs, faction_inventories)
+            if missing:
+                missing_str = ", ".join(f"{r.value}: {a:.0f}" for r, a in missing.items())
+                return BuildResult(False, f"Missing materials: {missing_str}")
+
+        # Deduct credits
+        faction_comp.credits -= cost
+
+        # Deduct materials
+        if material_reqs:
+            faction_inventories = self._get_faction_inventories(faction_id, em)
+            self._consume_materials(material_reqs, faction_inventories)
+
+        # Update station type
+        old_type = station.station_type
+        station.station_type = target_type
+
+        # Update station name
+        station_pos = em.get_component(station_entity, Position)
+        if station_pos:
+            body_name, _ = self.find_nearest_body((station_pos.x, station_pos.y), em)
+            station_entity.name = self._generate_station_name(target_type, body_name, faction_entity.name)
+
+        # Update config values for new station type
+        config = STATION_CONFIGS.get(target_type)
+        if config:
+            station.production_multiplier = config.get("production_multiplier", 1.0)
+            station.storage_capacity = config.get("storage_capacity", 1000)
+
+            # Update inventory capacity
+            inv = em.get_component(station_entity, Inventory)
+            if inv:
+                inv.capacity = station.storage_capacity
+
+        # Fire event
+        self.event_bus.publish(StationBuiltEvent(
+            station_id=station_id,
+            faction_id=faction_id,
+            station_type=target_type.value,
+            position=(station_pos.x, station_pos.y) if station_pos else (0, 0),
+            cost=cost,
+        ))
+
+        if material_reqs:
+            mat_str = ", ".join(f"{r.value}: {a:.0f}" for r, a in material_reqs.items())
+            return BuildResult(
+                True,
+                f"Upgraded {old_type.value} to {target_type.value} for {cost:.0f} credits + {mat_str}",
+                station_id
+            )
+
+        return BuildResult(
+            True,
+            f"Upgraded {old_type.value} to {target_type.value} for {cost:.0f} credits",
+            station_id
+        )
 
     def find_nearest_body(
         self,

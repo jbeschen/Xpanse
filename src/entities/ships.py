@@ -28,7 +28,8 @@ class Ship(Component):
     """Component identifying a ship."""
     ship_type: ShipType = ShipType.FREIGHTER
     owner_faction_id: UUID | None = None
-    max_speed: float = 0.5  # AU per day
+    max_speed: float = 2.5  # AU per day
+    acceleration: float = 0.6  # AU per day per day
     fuel_capacity: float = 100.0
     fuel: float = 100.0
     fuel_consumption: float = 0.1  # Per AU traveled
@@ -38,38 +39,44 @@ class Ship(Component):
 
 
 # Ship type configurations
+# Speeds in AU per day - at 10x game speed, ~2 AU/day means Earth to Mars in ~15 seconds real-time
 SHIP_CONFIGS: dict[ShipType, dict] = {
     ShipType.SHUTTLE: {
         "cargo_capacity": 50,
-        "max_speed": 1.0,
+        "max_speed": 4.0,  # Fast but small
+        "acceleration": 1.0,  # Quick to accelerate
         "fuel_capacity": 50,
         "fuel_consumption": 0.05,
         "max_crew": 4,
     },
     ShipType.FREIGHTER: {
         "cargo_capacity": 200,
-        "max_speed": 0.5,
+        "max_speed": 2.5,  # Good all-rounder
+        "acceleration": 0.6,
         "fuel_capacity": 100,
         "fuel_consumption": 0.1,
         "max_crew": 10,
     },
     ShipType.TANKER: {
         "cargo_capacity": 500,
-        "max_speed": 0.3,
+        "max_speed": 1.8,  # Slower, carries more
+        "acceleration": 0.4,
         "fuel_capacity": 150,
         "fuel_consumption": 0.15,
         "max_crew": 8,
     },
     ShipType.BULK_HAULER: {
         "cargo_capacity": 1000,
-        "max_speed": 0.2,
+        "max_speed": 1.2,  # Slowest, massive cargo
+        "acceleration": 0.3,
         "fuel_capacity": 200,
         "fuel_consumption": 0.2,
         "max_crew": 15,
     },
     ShipType.MINING_SHIP: {
         "cargo_capacity": 300,
-        "max_speed": 0.4,
+        "max_speed": 2.0,  # Decent speed
+        "acceleration": 0.5,
         "fuel_capacity": 120,
         "fuel_consumption": 0.12,
         "max_crew": 12,
@@ -115,6 +122,7 @@ def create_ship(
         ship_type=ship_type,
         owner_faction_id=owner_faction_id,
         max_speed=config["max_speed"],
+        acceleration=config["acceleration"],
         fuel_capacity=config["fuel_capacity"],
         fuel=config["fuel_capacity"],  # Start with full fuel
         fuel_consumption=config["fuel_consumption"],
@@ -161,12 +169,16 @@ def set_ship_destination(
     if nav:
         nav.target_x = destination[0]
         nav.target_y = destination[1]
-        nav.speed = ship.max_speed
+        nav.max_speed = ship.max_speed
+        nav.acceleration = ship.acceleration
+        # Don't reset current_speed - let ship maintain momentum if already moving
     else:
         em.add_component(ship_entity, NavigationTarget(
             target_x=destination[0],
             target_y=destination[1],
-            speed=ship.max_speed,
+            max_speed=ship.max_speed,
+            acceleration=ship.acceleration,
+            current_speed=0.0,  # Start from rest
         ))
 
 

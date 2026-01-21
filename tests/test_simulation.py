@@ -20,18 +20,18 @@ class TestGameTime:
     def test_advance_time(self):
         """Test advancing game time."""
         time = GameTime()
-        # New time scale: 1 real second at 1x speed = ~30 game days (1 month)
+        # Time scale: 1 real second at 1x speed = 1 game day
         time.advance(1.0, speed=1.0)
 
-        assert time.total_days == 30  # 1 real second = 30 game days
-        assert time.day == 31  # Started at day 1, advanced 30 days
+        assert time.total_days == 1.0  # 1 real second = 1 game day at 1x
+        assert time.day == 2  # Started at day 1, advanced 1 day
 
     def test_day_rollover(self):
         """Test day rollover to new year."""
         time = GameTime()
-        # At 1x speed, 1 real second = 30 days
-        # To advance 1 year (365 days), need 365/30 ≈ 12.17 real seconds
-        time.advance(12.17, speed=1.0)
+        # At 1x speed, 1 real second = 1 day
+        # To advance 1 year (365 days), need 365 real seconds at 1x
+        time.advance(365.0, speed=1.0)
 
         assert time.year == 2151
 
@@ -154,12 +154,12 @@ class TestWorld:
         world.speed = 5.0
         assert world.speed == 5.0
 
-        # Test clamping
-        world.speed = 100.0
-        assert world.speed == 10.0
+        # Test clamping (speed range is 1-100)
+        world.speed = 200.0
+        assert world.speed == 100.0
 
-        world.speed = 0.01
-        assert world.speed == 0.1
+        world.speed = 0.1
+        assert world.speed == 1.0
 
     def test_update_advances_time(self):
         """Test that update advances game time."""

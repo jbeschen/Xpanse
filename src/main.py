@@ -16,6 +16,7 @@ from .ui.camera import Camera
 from .ui.renderer import Renderer
 from .ui.input import InputHandler, InputAction
 from .systems.building import BuildingSystem
+from .systems.save_load import save_game, load_game
 
 
 def create_initial_world(world: World) -> None:
@@ -280,15 +281,40 @@ def main() -> None:
 
     # Register input callbacks
     def on_select(world_x: float, world_y: float) -> None:
+        # If in waypoint mode, set waypoint
+        if renderer.waypoint_mode:
+            renderer.set_waypoint(world_x, world_y)
         # If in build mode, try to place a station
-        if renderer.build_mode_active:
+        elif renderer.build_mode_active:
             renderer.try_place_station(world_x, world_y, world)
+        # If trade manager is in route creation mode, try to select station
+        elif renderer.trade_manager_visible and renderer.trade_manager.creating_route:
+            # Find station at click position
+            from src.entities.stations import Station
+            from src.solar_system.orbits import Position
+            em = world.entity_manager
+            for entity, station in em.get_all_components(Station):
+                pos = em.get_component(entity, Position)
+                if pos:
+                    dist = ((pos.x - world_x)**2 + (pos.y - world_y)**2)**0.5
+                    if dist < 0.1:
+                        renderer.trade_manager_handle_station_click(entity.id, entity.name)
+                        return
         else:
             renderer.select_at(world_x, world_y, world)
 
     def on_deselect() -> None:
-        if renderer.build_mode_active:
+        # Cancel various modes
+        if renderer.waypoint_mode:
+            renderer.cancel_waypoint_mode()
+        elif renderer.build_mode_active:
             renderer.cancel_build_mode()
+        elif renderer.trade_manager_visible:
+            if renderer.trade_manager.creating_route or renderer.trade_manager.assigning_ship:
+                renderer.trade_manager.cancel_creation()
+            else:
+                renderer.trade_manager_visible = False
+                renderer.trade_manager.visible = False
         else:
             renderer.deselect()
 
@@ -296,10 +322,22 @@ def main() -> None:
         world.toggle_pause()
 
     def on_speed_up() -> None:
-        world.speed = min(10.0, world.speed * 2)
+        # Speed steps: 1, 2, 5, 10, 20, 50, 100
+        speeds = [1, 2, 5, 10, 20, 50, 100]
+        current = world.speed
+        for s in speeds:
+            if s > current:
+                world.speed = s
+                break
 
     def on_speed_down() -> None:
-        world.speed = max(0.1, world.speed / 2)
+        # Speed steps: 1, 2, 5, 10, 20, 50, 100
+        speeds = [100, 50, 20, 10, 5, 2, 1]
+        current = world.speed
+        for s in speeds:
+            if s < current:
+                world.speed = s
+                break
 
     def on_toggle_ui() -> None:
         renderer.toggle_ui()
@@ -315,6 +353,50 @@ def main() -> None:
                 input_handler.state.mouse_y
             )
             renderer.try_place_station(wx, wy, world)
+        # Or purchase selected ship if ship menu is open
+        elif renderer.ship_menu_visible:
+            renderer.purchase_selected_ship(world)
+        # Or perform upgrade if upgrade menu is open
+        elif renderer.upgrade_menu_visible:
+            renderer.perform_upgrade(world)
+
+    def on_ship_purchase() -> None:
+        renderer.toggle_ship_menu()
+
+    def on_toggle_routes() -> None:
+        renderer.toggle_trade_routes()
+
+    def on_upgrade_station() -> None:
+        renderer.toggle_upgrade_menu()
+
+    def on_quick_save() -> None:
+        success, message = save_game(world, "quicksave")
+        if success:
+            renderer.add_notification(message, "success")
+        else:
+            renderer.add_notification(message, "error")
+
+    def on_quick_load() -> None:
+        from pathlib import Path
+        from .systems.save_load import SAVE_DIR
+
+        quicksave_path = SAVE_DIR / "quicksave.json"
+        if quicksave_path.exists():
+            success, message = load_game(world, quicksave_path)
+            if success:
+                renderer.add_notification(message, "success")
+                # Find and update player faction
+                from .entities.factions import Faction
+                for entity, faction in world.entity_manager.get_all_components(Faction):
+                    if faction.is_player:
+                        nonlocal player_faction_id
+                        player_faction_id = entity.id
+                        renderer.set_player_faction(player_faction_id, world)
+                        break
+            else:
+                renderer.add_notification(message, "error")
+        else:
+            renderer.add_notification("No quicksave found (press F5 to save)", "warning")
 
     input_handler.register_callback(InputAction.SELECT, on_select)
     input_handler.register_callback(InputAction.DESELECT, on_deselect)
@@ -324,6 +406,35 @@ def main() -> None:
     input_handler.register_callback(InputAction.TOGGLE_UI, on_toggle_ui)
     input_handler.register_callback(InputAction.BUILD_MODE, on_build_mode)
     input_handler.register_callback(InputAction.CONFIRM_BUILD, on_confirm_build)
+    input_handler.register_callback(InputAction.SHIP_PURCHASE, on_ship_purchase)
+    input_handler.register_callback(InputAction.TOGGLE_ROUTES, on_toggle_routes)
+    input_handler.register_callback(InputAction.UPGRADE_STATION, on_upgrade_station)
+    input_handler.register_callback(InputAction.QUICK_SAVE, on_quick_save)
+    input_handler.register_callback(InputAction.QUICK_LOAD, on_quick_load)
+
+    def on_trade_route() -> None:
+        # T key has different behavior depending on state
+        if renderer.trade_manager_visible:
+            # In trade manager, T starts route creation or advances it
+            if renderer.trade_manager.creating_route:
+                # Already creating, this shouldn't happen (click to select)
+                pass
+            else:
+                renderer.trade_manager.start_route_creation()
+        else:
+            # Open trade manager
+            renderer.toggle_trade_manager()
+
+    def on_help() -> None:
+        renderer.toggle_help()
+
+    def on_waypoint() -> None:
+        # W key enters waypoint mode for selected ship
+        renderer.enter_waypoint_mode()
+
+    input_handler.register_callback(InputAction.TRADE_ROUTE, on_trade_route)
+    input_handler.register_callback(InputAction.HELP, on_help)
+    input_handler.register_callback(InputAction.WAYPOINT, on_waypoint)
 
     # Main game loop
     running = True
@@ -332,22 +443,83 @@ def main() -> None:
         events = pygame.event.get()
         running = input_handler.process_events(events)
 
-        # Handle quit action and number keys for build menu
+        # Handle quit action and number keys for menus
         for event in events:
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_q:
                     running = False
-                # Number keys 1-7 for selecting station type in build menu
+                # Number keys for selecting options in menus
                 elif renderer.build_menu_visible:
+                    # Number keys 1-7 for selecting station type in build menu
                     if event.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4,
                                      pygame.K_5, pygame.K_6, pygame.K_7):
                         index = event.key - pygame.K_1
                         renderer.select_build_option(index)
+                elif renderer.ship_menu_visible:
+                    # Number keys 1-5 for selecting ship type in ship menu
+                    if event.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4, pygame.K_5):
+                        index = event.key - pygame.K_1
+                        renderer.select_ship_option(index)
+                elif renderer.upgrade_menu_visible:
+                    # Number keys 1-3 for selecting upgrade option
+                    if event.key in (pygame.K_1, pygame.K_2, pygame.K_3):
+                        index = event.key - pygame.K_1
+                        renderer.select_upgrade_option(index)
+                elif renderer.trade_route_visible:
+                    # Trade route panel controls (old panel - keeping for compatibility)
+                    if renderer.trade_route_panel.add_mode:
+                        # Selecting station to add
+                        if event.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4,
+                                         pygame.K_5, pygame.K_6):
+                            index = event.key - pygame.K_1
+                            renderer.trade_route_panel.select_waypoint(index)
+                        elif event.key == pygame.K_RETURN or event.key == pygame.K_KP_ENTER:
+                            renderer.trade_route_add_waypoint()
+                        elif event.key == pygame.K_ESCAPE:
+                            renderer.trade_route_panel.add_mode = False
+                    else:
+                        # Normal mode
+                        if event.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4, pygame.K_5):
+                            index = event.key - pygame.K_1
+                            renderer.trade_route_panel.select_waypoint(index)
+                        elif event.key == pygame.K_a:
+                            renderer.trade_route_panel.toggle_add_mode()
+                        elif event.key == pygame.K_d:
+                            renderer.trade_route_delete_waypoint()
+                        elif event.key == pygame.K_c:
+                            renderer.trade_route_clear()
+                elif renderer.trade_manager_visible:
+                    # Trade manager controls
+                    if renderer.trade_manager.assigning_ship:
+                        # Ship selection mode - 1-5 to select ship
+                        if event.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4, pygame.K_5):
+                            index = event.key - pygame.K_1
+                            renderer.trade_manager_assign_ship_by_index(index)
+                    elif not renderer.trade_manager.creating_route:
+                        # Normal mode - 1-8 to select route and assign ship
+                        if event.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4,
+                                         pygame.K_5, pygame.K_6, pygame.K_7, pygame.K_8):
+                            index = event.key - pygame.K_1
+                            renderer.trade_manager.select_route(index)
+                            renderer._update_trade_manager()
+                        elif event.key == pygame.K_d:
+                            renderer.trade_manager.delete_selected_route()
 
         # Update mouse world position for renderer
         renderer.update_mouse_position(
             input_handler.state.mouse_world_x,
             input_handler.state.mouse_world_y
+        )
+
+        # Disable keyboard panning when menus or modes are active
+        input_handler.keyboard_pan_enabled = not (
+            renderer.trade_route_visible or
+            renderer.build_menu_visible or
+            renderer.ship_menu_visible or
+            renderer.upgrade_menu_visible or
+            renderer.help_visible or
+            renderer.waypoint_mode or
+            renderer.trade_manager_visible
         )
 
         # Update simulation
