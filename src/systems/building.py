@@ -30,6 +30,43 @@ STATION_COSTS: dict[StationType, float] = {
     StationType.TRADE_HUB: 200000,
 }
 
+# Station material requirements (tier 2+ stations need materials)
+# Tier 1 (basic): just credits
+# Tier 2 (intermediate): credits + tier 1 processed materials
+# Tier 3 (advanced): credits + tier 2 advanced materials
+STATION_MATERIAL_COSTS: dict[StationType, dict[ResourceType, float]] = {
+    # Tier 1 - no materials required
+    StationType.OUTPOST: {},
+    StationType.MINING_STATION: {},
+
+    # Tier 2 - requires tier 1 processed materials
+    StationType.REFINERY: {
+        ResourceType.REFINED_METAL: 50,
+        ResourceType.SILICON: 20,
+    },
+    StationType.FACTORY: {
+        ResourceType.REFINED_METAL: 100,
+        ResourceType.ELECTRONICS: 20,
+    },
+
+    # Tier 3 - requires tier 2 advanced materials
+    StationType.COLONY: {
+        ResourceType.MACHINERY: 50,
+        ResourceType.LIFE_SUPPORT: 100,
+        ResourceType.ELECTRONICS: 50,
+    },
+    StationType.SHIPYARD: {
+        ResourceType.MACHINERY: 100,
+        ResourceType.ELECTRONICS: 50,
+        ResourceType.REFINED_METAL: 200,
+    },
+    StationType.TRADE_HUB: {
+        ResourceType.ELECTRONICS: 100,
+        ResourceType.MACHINERY: 50,
+        ResourceType.LIFE_SUPPORT: 50,
+    },
+}
+
 # Minimum distance between stations in AU
 MIN_STATION_DISTANCE = 0.1
 
@@ -88,6 +125,8 @@ class BuildingSystem(System):
         Returns:
             BuildResult indicating success/failure
         """
+        from ..simulation.resources import Inventory
+
         em = world.entity_manager
 
         # Find faction entity and get credits
@@ -102,13 +141,25 @@ class BuildingSystem(System):
         if not faction_comp:
             return BuildResult(False, "Faction not found")
 
-        # Check cost
+        # Check credit cost
         cost = STATION_COSTS.get(station_type, 0)
         if faction_comp.credits < cost:
             return BuildResult(
                 False,
                 f"Insufficient credits: need {cost:.0f}, have {faction_comp.credits:.0f}"
             )
+
+        # Check material requirements
+        material_reqs = STATION_MATERIAL_COSTS.get(station_type, {})
+        if material_reqs:
+            # Get all faction's station inventories
+            faction_inventories = self._get_faction_inventories(faction_id, em)
+
+            # Check if faction has enough materials across all stations
+            missing = self._check_material_availability(material_reqs, faction_inventories)
+            if missing:
+                missing_str = ", ".join(f"{r.value}: {a:.0f}" for r, a in missing.items())
+                return BuildResult(False, f"Missing materials: {missing_str}")
 
         # Check distance from other stations
         valid, msg = self._validate_position(position, em)
@@ -117,6 +168,10 @@ class BuildingSystem(System):
 
         # Deduct credits
         faction_comp.credits -= cost
+
+        # Deduct materials from faction's stations
+        if material_reqs:
+            self._consume_materials(material_reqs, faction_inventories)
 
         # Create the station
         station_name = self._generate_station_name(station_type, parent_body, faction_entity.name)
@@ -150,11 +205,82 @@ class BuildingSystem(System):
             cost=cost,
         ))
 
+        # Build message with materials
+        if material_reqs:
+            mat_str = ", ".join(f"{r.value}: {a:.0f}" for r, a in material_reqs.items())
+            return BuildResult(
+                True,
+                f"Built {station_type.value} for {cost:.0f} credits + {mat_str}",
+                station_entity.id
+            )
+
         return BuildResult(
             True,
             f"Built {station_type.value} for {cost:.0f} credits",
             station_entity.id
         )
+
+    def _get_faction_inventories(
+        self,
+        faction_id: UUID,
+        entity_manager: EntityManager
+    ) -> list:
+        """Get all inventories at faction-owned stations.
+
+        Returns:
+            List of Inventory components
+        """
+        from ..simulation.resources import Inventory
+
+        inventories = []
+        for entity, station in entity_manager.get_all_components(Station):
+            if station.owner_faction_id == faction_id:
+                inv = entity_manager.get_component(entity, Inventory)
+                if inv:
+                    inventories.append(inv)
+        return inventories
+
+    def _check_material_availability(
+        self,
+        requirements: dict[ResourceType, float],
+        inventories: list
+    ) -> dict[ResourceType, float]:
+        """Check if materials are available across inventories.
+
+        Returns:
+            Dict of missing resources and amounts (empty if all available)
+        """
+        # Sum up available resources across all inventories
+        available: dict[ResourceType, float] = {}
+        for inv in inventories:
+            for resource, amount in inv.resources.items():
+                available[resource] = available.get(resource, 0) + amount
+
+        # Check what's missing
+        missing: dict[ResourceType, float] = {}
+        for resource, needed in requirements.items():
+            have = available.get(resource, 0)
+            if have < needed:
+                missing[resource] = needed - have
+
+        return missing
+
+    def _consume_materials(
+        self,
+        requirements: dict[ResourceType, float],
+        inventories: list
+    ) -> None:
+        """Consume materials from faction inventories."""
+        for resource, needed in requirements.items():
+            remaining = needed
+            for inv in inventories:
+                if remaining <= 0:
+                    break
+                available = inv.get(resource)
+                if available > 0:
+                    take = min(available, remaining)
+                    inv.remove(resource, take)
+                    remaining -= take
 
     def _validate_position(
         self,
@@ -213,13 +339,45 @@ class BuildingSystem(System):
             abbrev = "".join(word[0] for word in faction_name.split()[:2])
             return f"{abbrev} {type_name}"
 
-    def can_afford(self, faction: Faction, station_type: StationType) -> bool:
-        """Check if a faction can afford to build a station type."""
-        return faction.credits >= STATION_COSTS.get(station_type, float('inf'))
+    def can_afford(
+        self,
+        faction: Faction,
+        station_type: StationType,
+        entity_manager: EntityManager | None = None,
+        faction_id: UUID | None = None
+    ) -> bool:
+        """Check if a faction can afford to build a station type.
+
+        Args:
+            faction: Faction component
+            station_type: Type of station to build
+            entity_manager: Entity manager (needed for material checks)
+            faction_id: Faction ID (needed for material checks)
+
+        Returns:
+            True if faction can afford both credits and materials
+        """
+        # Check credits
+        if faction.credits < STATION_COSTS.get(station_type, float('inf')):
+            return False
+
+        # Check materials if entity_manager provided
+        material_reqs = STATION_MATERIAL_COSTS.get(station_type, {})
+        if material_reqs and entity_manager and faction_id:
+            inventories = self._get_faction_inventories(faction_id, entity_manager)
+            missing = self._check_material_availability(material_reqs, inventories)
+            if missing:
+                return False
+
+        return True
 
     def get_cost(self, station_type: StationType) -> float:
-        """Get the cost of a station type."""
+        """Get the credit cost of a station type."""
         return STATION_COSTS.get(station_type, 0)
+
+    def get_material_cost(self, station_type: StationType) -> dict[ResourceType, float]:
+        """Get the material requirements for a station type."""
+        return STATION_MATERIAL_COSTS.get(station_type, {})
 
     def find_nearest_body(
         self,

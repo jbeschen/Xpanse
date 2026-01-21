@@ -255,15 +255,18 @@ class MiniMap(Panel):
             pygame.draw.rect(surface, COLORS['ui_highlight'], (rect_x, rect_y, rect_w, rect_h), 1)
 
 
-# Station build options for menu
+# Station build options for menu - now imported from building system
+from ..systems.building import STATION_COSTS, STATION_MATERIAL_COSTS
+
+# Build options list (station_type, display_name)
 BUILD_OPTIONS = [
-    (StationType.OUTPOST, "Outpost", 5000),
-    (StationType.MINING_STATION, "Mining Station", 10000),
-    (StationType.REFINERY, "Refinery", 20000),
-    (StationType.FACTORY, "Factory", 50000),
-    (StationType.SHIPYARD, "Shipyard", 75000),
-    (StationType.COLONY, "Colony", 100000),
-    (StationType.TRADE_HUB, "Trade Hub", 200000),
+    (StationType.OUTPOST, "Outpost"),
+    (StationType.MINING_STATION, "Mining Station"),
+    (StationType.REFINERY, "Refinery"),
+    (StationType.FACTORY, "Factory"),
+    (StationType.SHIPYARD, "Shipyard"),
+    (StationType.COLONY, "Colony"),
+    (StationType.TRADE_HUB, "Trade Hub"),
 ]
 
 
@@ -272,17 +275,35 @@ class BuildMenuPanel(Panel):
     """Panel for building stations."""
     selected_index: int = -1
     player_credits: float = 0.0
+    player_materials: dict = field(default_factory=dict)
 
     def __init__(self, x: int, y: int) -> None:
         super().__init__(
-            x=x, y=y, width=220, height=230, title="Build Station [B]"
+            x=x, y=y, width=280, height=320, title="Build Station [B]"
         )
         self.selected_index = -1
         self.player_credits = 0.0
+        self.player_materials = {}
 
-    def update_credits(self, credits: float) -> None:
-        """Update the player's available credits."""
+    def update_player_resources(self, credits: float, materials: dict) -> None:
+        """Update the player's available credits and materials."""
         self.player_credits = credits
+        self.player_materials = materials
+
+    def can_afford_station(self, station_type: StationType) -> bool:
+        """Check if player can afford a station (credits + materials)."""
+        # Check credits
+        cost = STATION_COSTS.get(station_type, float('inf'))
+        if self.player_credits < cost:
+            return False
+
+        # Check materials
+        material_reqs = STATION_MATERIAL_COSTS.get(station_type, {})
+        for resource, needed in material_reqs.items():
+            if self.player_materials.get(resource, 0) < needed:
+                return False
+
+        return True
 
     def select_option(self, index: int) -> StationType | None:
         """Select a build option by index.
@@ -291,8 +312,8 @@ class BuildMenuPanel(Panel):
             Selected station type if valid and affordable, None otherwise
         """
         if 0 <= index < len(BUILD_OPTIONS):
-            station_type, name, cost = BUILD_OPTIONS[index]
-            if self.player_credits >= cost:
+            station_type, name = BUILD_OPTIONS[index]
+            if self.can_afford_station(station_type):
                 self.selected_index = index
                 return station_type
         return None
@@ -304,9 +325,10 @@ class BuildMenuPanel(Panel):
         return None
 
     def get_selected_cost(self) -> float:
-        """Get cost of currently selected station type."""
+        """Get credit cost of currently selected station type."""
         if 0 <= self.selected_index < len(BUILD_OPTIONS):
-            return BUILD_OPTIONS[self.selected_index][2]
+            station_type = BUILD_OPTIONS[self.selected_index][0]
+            return STATION_COSTS.get(station_type, 0)
         return 0.0
 
     def draw(self, surface: pygame.Surface, font: pygame.font.Font) -> None:
@@ -334,8 +356,10 @@ class BuildMenuPanel(Panel):
         y += 5
 
         # Draw build options
-        for i, (station_type, name, cost) in enumerate(BUILD_OPTIONS):
-            can_afford = self.player_credits >= cost
+        for i, (station_type, name) in enumerate(BUILD_OPTIONS):
+            cost = STATION_COSTS.get(station_type, 0)
+            material_reqs = STATION_MATERIAL_COSTS.get(station_type, {})
+            can_afford = self.can_afford_station(station_type)
             is_selected = i == self.selected_index
 
             # Choose color based on state
@@ -356,12 +380,32 @@ class BuildMenuPanel(Panel):
             option_surf = font.render(option_text, True, color)
             surface.blit(option_surf, (self.x + 10, y))
 
-            # Draw cost on right side
-            cost_text = f"{cost:,}"
+            # Draw credit cost on right side
+            cost_text = f"{cost:,}c"
             cost_surf = font.render(cost_text, True, color)
             surface.blit(cost_surf, (self.x + self.width - cost_surf.get_width() - 10, y))
 
-            y += line_height + 2
+            y += line_height
+
+            # Draw material requirements if any (smaller text)
+            if material_reqs:
+                mat_parts = []
+                for resource, amount in material_reqs.items():
+                    # Abbreviate resource names
+                    abbrev = resource.value[:3].upper()
+                    have = self.player_materials.get(resource, 0)
+                    mat_color = color if have >= amount else (255, 100, 100)
+                    mat_parts.append((f"{abbrev}:{amount:.0f}", mat_color))
+
+                x_offset = self.x + 25
+                for mat_text, mat_color in mat_parts:
+                    mat_surf = font.render(mat_text, True, mat_color)
+                    surface.blit(mat_surf, (x_offset, y))
+                    x_offset += mat_surf.get_width() + 8
+
+                y += line_height
+
+            y += 2
 
         # Instructions at bottom
         y += 5

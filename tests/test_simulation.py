@@ -15,28 +15,25 @@ class TestGameTime:
 
         assert time.day == 1
         assert time.year == 2150
-        assert time.total_seconds == 0
+        assert time.total_days == 0
 
     def test_advance_time(self):
         """Test advancing game time."""
         time = GameTime()
-        # In the implementation, advance() converts real seconds to game minutes
-        # dt * speed * 60 gives game seconds stored in total_seconds
-        # So 1 real second at 1x speed = 60 game minutes
-        time.advance(1.0, speed=1.0)  # 1 real second at 1x = 60 game minutes
+        # New time scale: 1 real second at 1x speed = ~30 game days (1 month)
+        time.advance(1.0, speed=1.0)
 
-        assert time.total_seconds == 60  # 1 real second = 60 game minutes
-        assert time.hour == 1  # After 60 minutes, we're in hour 1
+        assert time.total_days == 30  # 1 real second = 30 game days
+        assert time.day == 31  # Started at day 1, advanced 30 days
 
     def test_day_rollover(self):
-        """Test day rollover."""
+        """Test day rollover to new year."""
         time = GameTime()
-        # To advance 1 day: need 24 hours * 60 minutes = 1440 game minutes
-        # At 1x speed, 1 real second = 60 game minutes
-        # So need 1440/60 = 24 real seconds
-        time.advance(24.0, speed=1.0)  # 24 real seconds = 1440 game minutes = 1 day
+        # At 1x speed, 1 real second = 30 days
+        # To advance 1 year (365 days), need 365/30 ≈ 12.17 real seconds
+        time.advance(12.17, speed=1.0)
 
-        assert time.day == 2
+        assert time.year == 2151
 
     def test_str_format(self):
         """Test string representation."""
@@ -167,21 +164,21 @@ class TestWorld:
     def test_update_advances_time(self):
         """Test that update advances game time."""
         world = World()
-        initial_time = world.game_time.total_seconds
+        initial_time = world.game_time.total_days
 
         world.update(1.0)  # 1 second
 
-        assert world.game_time.total_seconds > initial_time
+        assert world.game_time.total_days > initial_time
 
     def test_update_paused(self):
         """Test that update does nothing when paused."""
         world = World()
         world.pause()
-        initial_time = world.game_time.total_seconds
+        initial_time = world.game_time.total_days
 
         world.update(1.0)
 
-        assert world.game_time.total_seconds == initial_time
+        assert world.game_time.total_days == initial_time
 
 
 class TestEventBus:

@@ -152,16 +152,33 @@ class Renderer:
         return False
 
     def _update_build_menu_credits(self) -> None:
-        """Update credits in the build menu."""
+        """Update credits and materials in the build menu."""
         if not self._world or not self.player_faction_id:
             return
 
         from ..entities.factions import Faction
+        from ..entities.stations import Station
+        from ..simulation.resources import Inventory
+
         em = self._world.entity_manager
+
+        # Get player credits
+        credits = 0.0
         for entity, faction in em.get_all_components(Faction):
             if entity.id == self.player_faction_id:
-                self.build_menu.update_credits(faction.credits)
+                credits = faction.credits
                 break
+
+        # Sum up materials across all player-owned stations
+        materials: dict = {}
+        for entity, station in em.get_all_components(Station):
+            if station.owner_faction_id == self.player_faction_id:
+                inv = em.get_component(entity, Inventory)
+                if inv:
+                    for resource, amount in inv.resources.items():
+                        materials[resource] = materials.get(resource, 0) + amount
+
+        self.build_menu.update_player_resources(credits, materials)
 
     def render(self, world: World, fps: float) -> None:
         """Render the game state."""

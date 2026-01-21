@@ -18,6 +18,10 @@ class InputAction(Enum):
     ZOOM_IN = "zoom_in"
     ZOOM_OUT = "zoom_out"
     PAN = "pan"
+    PAN_LEFT = "pan_left"
+    PAN_RIGHT = "pan_right"
+    PAN_UP = "pan_up"
+    PAN_DOWN = "pan_down"
     PAUSE = "pause"
     SPEED_UP = "speed_up"
     SPEED_DOWN = "speed_down"
@@ -74,6 +78,9 @@ class InputHandler:
         self.state.scroll_delta = 0
         self.state.keys_just_pressed.clear()
 
+        # Handle continuous keyboard panning
+        self._handle_keyboard_pan()
+
         for event in events:
             if event.type == pygame.QUIT:
                 self._fire_action(InputAction.QUIT)
@@ -124,14 +131,19 @@ class InputHandler:
             self.camera.start_pan(event.pos[0], event.pos[1])
             self._fire_action(InputAction.PAN)
 
-        elif event.button == 3:  # Right click
+        elif event.button == 3:  # Right click - start pan (touchpad-friendly)
             self.state.right_click = True
-            self._fire_action(InputAction.CONTEXT_MENU, self.state.mouse_world_x, self.state.mouse_world_y)
+            self.camera.start_pan(event.pos[0], event.pos[1])
+            self._fire_action(InputAction.PAN)
 
     def _handle_mouse_button_up(self, event: pygame.event.Event) -> None:
         """Handle mouse button release."""
         if event.button == 2:  # Middle click - end pan
             self.state.middle_click = False
+            self.camera.end_pan()
+
+        elif event.button == 3:  # Right click - end pan
+            self.state.right_click = False
             self.camera.end_pan()
 
     def _handle_mouse_wheel(self, event: pygame.event.Event) -> None:
@@ -178,6 +190,28 @@ class InputHandler:
     def _handle_key_up(self, event: pygame.event.Event) -> None:
         """Handle key release."""
         self.state.keys_pressed.discard(event.key)
+
+    def _handle_keyboard_pan(self) -> None:
+        """Handle continuous keyboard panning with WASD/Arrow keys."""
+        # Pan speed in pixels per frame (adjust for smooth panning)
+        pan_speed = 10
+
+        dx = 0
+        dy = 0
+
+        # Check WASD keys
+        if pygame.K_w in self.state.keys_pressed or pygame.K_UP in self.state.keys_pressed:
+            dy -= pan_speed
+        if pygame.K_s in self.state.keys_pressed or pygame.K_DOWN in self.state.keys_pressed:
+            dy += pan_speed
+        if pygame.K_a in self.state.keys_pressed or pygame.K_LEFT in self.state.keys_pressed:
+            dx -= pan_speed
+        if pygame.K_d in self.state.keys_pressed or pygame.K_RIGHT in self.state.keys_pressed:
+            dx += pan_speed
+
+        # Apply panning if any direction is pressed
+        if dx != 0 or dy != 0:
+            self.camera.pan_by_screen(dx, dy)
 
     def is_key_pressed(self, key: int) -> bool:
         """Check if a key is currently pressed."""

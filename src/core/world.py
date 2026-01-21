@@ -13,43 +13,36 @@ if TYPE_CHECKING:
 @dataclass
 class GameTime:
     """Tracks simulation time."""
-    total_seconds: float = 0.0
+    total_days: float = 0.0
     day: int = 1
     year: int = 2150
 
-    # Time scale: 1 real second = 1 game minute at 1x speed
-    SECONDS_PER_MINUTE: float = 1.0
-    MINUTES_PER_HOUR: int = 60
-    HOURS_PER_DAY: int = 24
+    # Time scale: 1 real second = ~30 game days (1/12 year) at 1x speed
+    # This makes a full year pass in ~12 seconds at 1x speed
+    DAYS_PER_REAL_SECOND: float = 30.0  # ~1 month per second
     DAYS_PER_YEAR: int = 365
 
     def advance(self, dt: float, speed: float = 1.0) -> None:
         """Advance game time by dt real seconds."""
-        game_seconds = dt * speed * 60  # Convert to game minutes
-        self.total_seconds += game_seconds
+        game_days = dt * speed * self.DAYS_PER_REAL_SECOND
+        self.total_days += game_days
 
         # Calculate day/year
-        total_minutes = self.total_seconds
-        total_hours = total_minutes / self.MINUTES_PER_HOUR
-        total_days = total_hours / self.HOURS_PER_DAY
-
-        self.day = int(total_days % self.DAYS_PER_YEAR) + 1
-        self.year = 2150 + int(total_days / self.DAYS_PER_YEAR)
+        self.day = int(self.total_days % self.DAYS_PER_YEAR) + 1
+        self.year = 2150 + int(self.total_days / self.DAYS_PER_YEAR)
 
     @property
-    def hour(self) -> int:
-        """Current hour of the day."""
-        total_minutes = self.total_seconds
-        total_hours = total_minutes / self.MINUTES_PER_HOUR
-        return int(total_hours % self.HOURS_PER_DAY)
+    def month(self) -> int:
+        """Approximate month (1-12)."""
+        return ((self.day - 1) // 30) + 1
 
     @property
-    def minute(self) -> int:
-        """Current minute of the hour."""
-        return int(self.total_seconds % self.MINUTES_PER_HOUR)
+    def total_years(self) -> float:
+        """Total years elapsed."""
+        return self.total_days / self.DAYS_PER_YEAR
 
     def __str__(self) -> str:
-        return f"Year {self.year}, Day {self.day}, {self.hour:02d}:{self.minute:02d}"
+        return f"Year {self.year}, Day {self.day}"
 
 
 class World:

@@ -117,6 +117,27 @@ class Camera:
         """End panning."""
         self.is_panning = False
 
+    def pan(self, dx: float, dy: float) -> None:
+        """Pan the camera by a world-space delta.
+
+        Args:
+            dx: Delta X in AU
+            dy: Delta Y in AU
+        """
+        self.x += dx
+        self.y += dy
+
+    def pan_by_screen(self, screen_dx: int, screen_dy: int) -> None:
+        """Pan the camera by a screen-space delta.
+
+        Args:
+            screen_dx: Delta X in pixels
+            screen_dy: Delta Y in pixels
+        """
+        world_dx = screen_dx / (self.zoom * AU_TO_PIXELS)
+        world_dy = -screen_dy / (self.zoom * AU_TO_PIXELS)  # Y is inverted
+        self.pan(world_dx, world_dy)
+
     def center_on(self, world_x: float, world_y: float) -> None:
         """Center the camera on a world position."""
         self.x = world_x
