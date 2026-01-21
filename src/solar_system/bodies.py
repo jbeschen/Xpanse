@@ -363,3 +363,81 @@ class SolarSystemData:
                     result.append(body)
                     break
         return result
+
+    @staticmethod
+    def get_planetary_system(planet_name: str) -> list[CelestialBodyData]:
+        """Get a planet and all its moons as a system.
+
+        Args:
+            planet_name: Name of the planet
+
+        Returns:
+            List containing the planet and its moons
+        """
+        result = []
+        planet = SOLAR_SYSTEM_DATA.get(planet_name)
+        if planet and planet.body_type in (BodyType.PLANET, BodyType.DWARF_PLANET):
+            result.append(planet)
+            # Add moons
+            result.extend(SolarSystemData.get_moons_of(planet_name))
+        return result
+
+    @staticmethod
+    def get_planetary_system_resources(planet_name: str) -> list[tuple[str, ResourceType, float]]:
+        """Get all resources available in a planetary system (planet + moons).
+
+        Args:
+            planet_name: Name of the planet
+
+        Returns:
+            List of (body_name, resource_type, richness) tuples, sorted by richness
+        """
+        result = []
+        bodies = SolarSystemData.get_planetary_system(planet_name)
+
+        for body in bodies:
+            for resource, richness in body.resources:
+                result.append((body.name, resource, richness))
+
+        # Sort by richness (highest first)
+        result.sort(key=lambda x: x[2], reverse=True)
+        return result
+
+    @staticmethod
+    def get_nearest_planet(body_name: str) -> str | None:
+        """Get the nearest planet for a body (self if planet, parent if moon).
+
+        Args:
+            body_name: Name of the body
+
+        Returns:
+            Planet name or None
+        """
+        body = SOLAR_SYSTEM_DATA.get(body_name)
+        if not body:
+            return None
+
+        if body.body_type in (BodyType.PLANET, BodyType.DWARF_PLANET):
+            return body_name
+        elif body.body_type == BodyType.MOON:
+            return body.parent
+        else:
+            return None
+
+    @staticmethod
+    def is_in_same_system(body1: str, body2: str) -> bool:
+        """Check if two bodies are in the same planetary system.
+
+        Args:
+            body1: First body name
+            body2: Second body name
+
+        Returns:
+            True if both are in the same system (same planet or planet+moon)
+        """
+        planet1 = SolarSystemData.get_nearest_planet(body1)
+        planet2 = SolarSystemData.get_nearest_planet(body2)
+
+        if planet1 and planet2:
+            return planet1 == planet2
+        return False

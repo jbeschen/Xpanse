@@ -44,6 +44,44 @@ class Recipe:
 
 
 # Define all production recipes
+# Mapping from station type to recipe categories
+# Used by drones to know what inputs a station needs
+STATION_TYPE_CATEGORIES: dict[str, list[str]] = {
+    "refinery": ["refinery"],
+    "factory": ["factory", "advanced_factory"],
+    "shipyard": ["shipyard"],
+    "colony": ["factory"],  # Colonies can manufacture basic goods
+    "trade_hub": [],  # Trade hubs don't produce, they trade
+}
+
+
+def get_recipes_for_category(category: str) -> list["Recipe"]:
+    """Get all recipes that belong to a category."""
+    return [r for r in RECIPES.values() if r.category == category]
+
+
+def get_station_input_resources(station_type: str) -> set:
+    """Get all input resources needed by a station type.
+
+    Args:
+        station_type: Station type name (e.g., "refinery", "factory")
+
+    Returns:
+        Set of ResourceType values that this station type needs as inputs
+    """
+    from ..entities.stations import StationType
+
+    # Map station type to category
+    categories = STATION_TYPE_CATEGORIES.get(station_type.lower(), [])
+
+    inputs = set()
+    for category in categories:
+        for recipe in get_recipes_for_category(category):
+            inputs.update(recipe.inputs.keys())
+
+    return inputs
+
+
 RECIPES: dict[str, Recipe] = {
     # Tier 0 -> Tier 1 (Refining)
     "refine_metal": Recipe(

@@ -21,6 +21,7 @@ class ShipType(Enum):
     TANKER = "tanker"  # Bulk liquid transport
     BULK_HAULER = "bulk_hauler"  # Large cargo capacity
     MINING_SHIP = "mining_ship"  # Can mine asteroids
+    DRONE = "drone"  # Automated local hauler, very small capacity
 
 
 @dataclass
@@ -36,6 +37,10 @@ class Ship(Component):
     crew: int = 5
     max_crew: int = 10
     hull_integrity: float = 1.0  # 0-1
+    # Drone-specific fields
+    is_drone: bool = False  # If true, restricted to local system
+    home_station_id: UUID | None = None  # Station this drone serves
+    local_system: str = ""  # Planet name this drone is restricted to
 
 
 # Ship type configurations
@@ -80,6 +85,14 @@ SHIP_CONFIGS: dict[ShipType, dict] = {
         "fuel_capacity": 120,
         "fuel_consumption": 0.12,
         "max_crew": 12,
+    },
+    ShipType.DRONE: {
+        "cargo_capacity": 20,  # Very small capacity
+        "max_speed": 3.0,  # Fast but local only
+        "acceleration": 1.5,  # Quick to accelerate
+        "fuel_capacity": 30,
+        "fuel_consumption": 0.02,  # Efficient
+        "max_crew": 0,  # Automated
     },
 }
 
@@ -142,6 +155,65 @@ def create_ship(
         em.add_component(entity, Trader(
             min_profit_threshold=5.0,
         ))
+
+    return entity
+
+
+def create_drone(
+    world: World,
+    name: str,
+    position: tuple[float, float],
+    owner_faction_id: UUID,
+    home_station_id: UUID,
+    local_system: str,
+) -> Entity:
+    """Create a drone (automated local hauler).
+
+    Args:
+        world: The game world
+        name: Drone name
+        position: (x, y) position in AU
+        owner_faction_id: Owning faction ID
+        home_station_id: Station this drone serves
+        local_system: Planet name this drone is restricted to
+
+    Returns:
+        The created entity
+    """
+    config = SHIP_CONFIGS[ShipType.DRONE]
+
+    # Create entity with drone tag
+    tags = {"ship", "drone", "owned"}
+    entity = world.create_entity(name=name, tags=tags)
+    em = world.entity_manager
+
+    # Add ship component with drone settings
+    em.add_component(entity, Ship(
+        ship_type=ShipType.DRONE,
+        owner_faction_id=owner_faction_id,
+        max_speed=config["max_speed"],
+        acceleration=config["acceleration"],
+        fuel_capacity=config["fuel_capacity"],
+        fuel=config["fuel_capacity"],
+        fuel_consumption=config["fuel_consumption"],
+        max_crew=0,
+        crew=0,
+        is_drone=True,
+        home_station_id=home_station_id,
+        local_system=local_system,
+    ))
+
+    # Add position and velocity
+    em.add_component(entity, Position(x=position[0], y=position[1]))
+    em.add_component(entity, Velocity(vx=0.0, vy=0.0))
+
+    # Add small cargo hold
+    em.add_component(entity, CargoHold(capacity=config["cargo_capacity"]))
+
+    # Drones have trader component for hauling
+    em.add_component(entity, Trader(
+        min_profit_threshold=0.0,  # Drones don't care about profit
+    ))
 
     return entity
 

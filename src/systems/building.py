@@ -11,7 +11,7 @@ from ..entities.stations import (
     Station, StationType, STATION_CONFIGS,
     create_station, create_mining_station
 )
-from ..entities.ships import Ship, ShipType, create_ship, SHIP_CONFIGS
+from ..entities.ships import Ship, ShipType, create_ship, create_drone, SHIP_CONFIGS
 from ..entities.factions import Faction
 from ..solar_system.orbits import Position
 from ..simulation.resources import ResourceType
@@ -72,9 +72,6 @@ STATION_MATERIAL_COSTS: dict[StationType, dict[ResourceType, float]] = {
         ResourceType.REFINED_METAL: 100,
     },
 }
-
-# Minimum distance between stations in AU
-MIN_STATION_DISTANCE = 0.1
 
 # Maximum distance from ship to allow building
 MAX_BUILD_DISTANCE = 0.15  # AU
@@ -271,6 +268,35 @@ class BuildingSystem(System):
                 owner_faction_id=faction_id,
             )
 
+        # Spawn a drone for refineries and higher-tier stations
+        # These automated haulers help get the station operational
+        drone_stations = {
+            StationType.REFINERY,
+            StationType.FACTORY,
+            StationType.COLONY,
+            StationType.SHIPYARD,
+            StationType.TRADE_HUB,
+        }
+        if station_type in drone_stations:
+            # Find the planetary system this station is in
+            from ..solar_system.bodies import SolarSystemData
+            local_system = SolarSystemData.get_nearest_planet(parent_body) or parent_body
+
+            # Get faction name for drone naming
+            faction_name = faction_entity.name if faction_entity else "Unknown"
+            drone_name = f"{faction_name} Drone"
+
+            # Spawn drone slightly offset from station
+            drone_pos = (position[0] + 0.01, position[1] + 0.01)
+            create_drone(
+                world=world,
+                name=drone_name,
+                position=drone_pos,
+                owner_faction_id=faction_id,
+                home_station_id=station_entity.id,
+                local_system=local_system,
+            )
+
         # Fire event
         from ..core.events import StationBuiltEvent
         self.event_bus.publish(StationBuiltEvent(
@@ -372,21 +398,7 @@ class BuildingSystem(System):
         Returns:
             (valid, message) tuple
         """
-        px, py = position
-
-        # Check distance from all existing stations
-        for entity, station in entity_manager.get_all_components(Station):
-            pos = entity_manager.get_component(entity, Position)
-            if not pos:
-                continue
-
-            dx = pos.x - px
-            dy = pos.y - py
-            distance = math.sqrt(dx * dx + dy * dy)
-
-            if distance < MIN_STATION_DISTANCE:
-                return False, f"Too close to {entity.name} ({distance:.3f} AU, minimum {MIN_STATION_DISTANCE} AU)"
-
+        # Stations can be built anywhere - they will be organized as menu items under planetary bodies
         return True, "Valid position"
 
     def _check_ship_nearby(

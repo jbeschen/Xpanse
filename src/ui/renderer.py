@@ -10,7 +10,8 @@ from .camera import Camera
 from .panels import (
     InfoPanel, StatusBar, MiniMap, BuildMenuPanel, PlayerHUD,
     ShipPurchasePanel, NotificationPanel, PriceHistoryGraph, UpgradePanel,
-    TradeRoutePanel, HelpPanel, ContextPrompt, TradeRouteManagerPanel
+    TradeRoutePanel, HelpPanel, ContextPrompt, TradeRouteManagerPanel,
+    ResourceSelectionPanel, MenuManager, MenuId
 )
 from ..entities.stations import StationType
 from ..entities.ships import ShipType
@@ -63,6 +64,14 @@ class Renderer:
             x=SCREEN_WIDTH - 370, y=170
         )
         self.trade_manager.visible = False
+        self.resource_selection = ResourceSelectionPanel(
+            x=SCREEN_WIDTH // 2 - 140, y=SCREEN_HEIGHT // 2 - 100
+        )
+        self.resource_selection.visible = False
+
+        # Menu manager - handles focus stack for all menus
+        self.menu_manager = MenuManager()
+        self._setup_menu_callbacks()
 
         # State
         self.selected_entity: Entity | None = None
@@ -73,36 +82,114 @@ class Renderer:
 
         # Build mode state
         self.build_mode_active = False
-        self.build_menu_visible = False
         self.selected_station_type: StationType | None = None
         self.mouse_world_x = 0.0
         self.mouse_world_y = 0.0
 
-        # Ship purchase state
-        self.ship_menu_visible = False
-
-        # Upgrade state
-        self.upgrade_menu_visible = False
-
-        # Trade route state
-        self.trade_route_visible = False
-
-        # Help state
-        self.help_visible = False
-
         # Waypoint mode state
-        self.waypoint_mode = False
         self.waypoint_ship_id: UUID | None = None
         self.waypoint_ship_name: str = ""
-
-        # Trade manager state
-        self.trade_manager_visible = False
 
         # Player faction info
         self.player_faction_id: UUID | None = None
         self.player_faction_color: tuple[int, int, int] = (255, 255, 255)
         self.building_system: "BuildingSystem | None" = None
         self._world: "World | None" = None
+
+    def _setup_menu_callbacks(self) -> None:
+        """Register close callbacks for all menus."""
+        self.menu_manager.register_close_callback(
+            MenuId.BUILD_MENU, self._on_close_build_menu
+        )
+        self.menu_manager.register_close_callback(
+            MenuId.RESOURCE_SELECTION, self._on_close_resource_selection
+        )
+        self.menu_manager.register_close_callback(
+            MenuId.SHIP_MENU, self._on_close_ship_menu
+        )
+        self.menu_manager.register_close_callback(
+            MenuId.UPGRADE_MENU, self._on_close_upgrade_menu
+        )
+        self.menu_manager.register_close_callback(
+            MenuId.TRADE_ROUTE, self._on_close_trade_route
+        )
+        self.menu_manager.register_close_callback(
+            MenuId.TRADE_MANAGER, self._on_close_trade_manager
+        )
+        self.menu_manager.register_close_callback(
+            MenuId.HELP, self._on_close_help
+        )
+        self.menu_manager.register_close_callback(
+            MenuId.WAYPOINT_MODE, self._on_close_waypoint_mode
+        )
+
+    def _on_close_build_menu(self) -> None:
+        """Called when build menu is closed."""
+        self.build_menu.visible = False
+        self.cancel_build_mode()
+
+    def _on_close_resource_selection(self) -> None:
+        """Called when resource selection is closed."""
+        self.resource_selection.visible = False
+
+    def _on_close_ship_menu(self) -> None:
+        """Called when ship menu is closed."""
+        self.ship_menu.visible = False
+
+    def _on_close_upgrade_menu(self) -> None:
+        """Called when upgrade menu is closed."""
+        self.upgrade_panel.visible = False
+
+    def _on_close_trade_route(self) -> None:
+        """Called when trade route panel is closed."""
+        self.trade_route_panel.visible = False
+
+    def _on_close_trade_manager(self) -> None:
+        """Called when trade manager is closed."""
+        self.trade_manager.visible = False
+
+    def _on_close_help(self) -> None:
+        """Called when help panel is closed."""
+        self.help_panel.visible = False
+
+    def _on_close_waypoint_mode(self) -> None:
+        """Called when waypoint mode is closed."""
+        self.waypoint_ship_id = None
+        self.waypoint_ship_name = ""
+        self.context_prompt.visible = False
+
+    # Menu visibility properties - delegate to menu manager
+    @property
+    def build_menu_visible(self) -> bool:
+        return self.menu_manager.is_open(MenuId.BUILD_MENU)
+
+    @property
+    def ship_menu_visible(self) -> bool:
+        return self.menu_manager.is_open(MenuId.SHIP_MENU)
+
+    @property
+    def upgrade_menu_visible(self) -> bool:
+        return self.menu_manager.is_open(MenuId.UPGRADE_MENU)
+
+    @property
+    def trade_route_visible(self) -> bool:
+        return self.menu_manager.is_open(MenuId.TRADE_ROUTE)
+
+    @property
+    def help_visible(self) -> bool:
+        return self.menu_manager.is_open(MenuId.HELP)
+
+    @property
+    def trade_manager_visible(self) -> bool:
+        return self.menu_manager.is_open(MenuId.TRADE_MANAGER)
+
+    @property
+    def waypoint_mode(self) -> bool:
+        return self.menu_manager.is_open(MenuId.WAYPOINT_MODE)
+
+    @property
+    def resource_selection_visible(self) -> bool:
+        return self.menu_manager.is_open(MenuId.RESOURCE_SELECTION)
 
     def set_player_faction(self, faction_id: UUID | None, world: "World") -> None:
         """Set the player faction for highlighting."""
@@ -128,11 +215,14 @@ class Renderer:
 
     def toggle_build_menu(self) -> None:
         """Toggle the build menu visibility."""
-        self.build_menu_visible = not self.build_menu_visible
-        self.build_menu.visible = self.build_menu_visible
-
-        if not self.build_menu_visible:
+        if self.build_menu_visible:
+            self.menu_manager.pop(MenuId.BUILD_MENU)
+            self.build_menu.visible = False
             self.cancel_build_mode()
+        else:
+            self.menu_manager.close_all()  # Close other menus first
+            self.menu_manager.push(MenuId.BUILD_MENU)
+            self.build_menu.visible = True
 
     def select_build_option(self, index: int) -> None:
         """Select a build option from the menu."""
@@ -157,7 +247,7 @@ class Renderer:
         """Try to place a station at the given world coordinates.
 
         Returns:
-            True if station was placed successfully
+            True if station was placed successfully (or resource menu shown)
         """
         if not self.build_mode_active or not self.selected_station_type:
             return False
@@ -170,14 +260,79 @@ class Renderer:
             (world_x, world_y), world.entity_manager
         )
 
-        # Get resource type if building a mining station
-        resource_type = None
+        # For mining stations, show resource selection menu instead of building directly
         if self.selected_station_type == StationType.MINING_STATION:
-            resources = self.building_system.get_body_resources(
-                parent_body, world.entity_manager
-            )
-            if resources:
-                resource_type = resources[0][0]  # Use first available resource
+            from ..solar_system.bodies import SolarSystemData, BodyType, SOLAR_SYSTEM_DATA
+
+            # Find the nearest planet (not moon) for the planetary system
+            body_data = SOLAR_SYSTEM_DATA.get(parent_body)
+            if body_data and body_data.body_type == BodyType.MOON:
+                # If nearest is a moon, use its parent planet
+                planet_name = body_data.parent
+            else:
+                planet_name = parent_body
+
+            # Show resource selection for the planetary system
+            if planet_name:
+                self.resource_selection.show_options(planet_name, (world_x, world_y))
+                # Push resource selection on top of build menu
+                self.menu_manager.push(MenuId.RESOURCE_SELECTION)
+                # Keep build mode active, wait for resource selection
+                return True
+
+        # For non-mining stations, build directly
+        return self._complete_station_build(world_x, world_y, world, parent_body, None)
+
+    def select_mining_resource(self, index: int, world: "World") -> bool:
+        """Handle resource selection for mining station.
+
+        Args:
+            index: Selected option index (0-based)
+            world: The game world
+
+        Returns:
+            True if mining station was built successfully
+        """
+        if not self.menu_manager.is_active(MenuId.RESOURCE_SELECTION):
+            return False
+
+        result = self.resource_selection.select_option(index)
+        if not result:
+            return False
+
+        body_name, resource_type = result
+        position = self.resource_selection.build_position
+
+        # Close resource selection menu
+        self.menu_manager.pop(MenuId.RESOURCE_SELECTION)
+        self.resource_selection.visible = False
+
+        # Build the mining station with selected resource
+        success = self._complete_station_build(
+            position[0], position[1], world,
+            body_name, resource_type
+        )
+
+        if success:
+            self.resource_selection.visible = False
+
+        return success
+
+    def _complete_station_build(
+        self,
+        world_x: float,
+        world_y: float,
+        world: "World",
+        parent_body: str,
+        resource_type
+    ) -> bool:
+        """Complete station building after all selections made.
+
+        Returns:
+            True if station was placed successfully
+        """
+        if not self.building_system or not self.player_faction_id:
+            return False
 
         # Request the build
         result = self.building_system.request_build(
@@ -190,11 +345,16 @@ class Renderer:
         )
 
         if result.success:
+            # Show success notification
+            self.add_notification(result.message, "success")
+
             # Successfully built - exit build mode but keep menu open
             self.build_mode_active = False
             self.selected_station_type = None
             self.build_menu.selected_index = -1
             return True
+        else:
+            self.add_notification(result.message, "error")
 
         return False
 
@@ -234,14 +394,13 @@ class Renderer:
         if not self._world or not self.player_faction_id:
             return
 
-        # Close build menu if open
-        if self.build_menu_visible:
-            self.build_menu_visible = False
-            self.build_menu.visible = False
-            self.cancel_build_mode()
-
-        self.ship_menu_visible = not self.ship_menu_visible
-        self.ship_menu.visible = self.ship_menu_visible
+        if self.ship_menu_visible:
+            self.menu_manager.pop(MenuId.SHIP_MENU)
+            self.ship_menu.visible = False
+        else:
+            self.menu_manager.close_all()
+            self.menu_manager.push(MenuId.SHIP_MENU)
+            self.ship_menu.visible = True
 
         # Update shipyard info if selected entity is a shipyard
         if self.ship_menu_visible and self.selected_entity:
@@ -300,18 +459,13 @@ class Renderer:
         if not self._world or not self.player_faction_id:
             return
 
-        # Close other menus if open
-        if self.build_menu_visible:
-            self.build_menu_visible = False
-            self.build_menu.visible = False
-            self.cancel_build_mode()
-
-        if self.ship_menu_visible:
-            self.ship_menu_visible = False
-            self.ship_menu.visible = False
-
-        self.upgrade_menu_visible = not self.upgrade_menu_visible
-        self.upgrade_panel.visible = self.upgrade_menu_visible
+        if self.upgrade_menu_visible:
+            self.menu_manager.pop(MenuId.UPGRADE_MENU)
+            self.upgrade_panel.visible = False
+        else:
+            self.menu_manager.close_all()
+            self.menu_manager.push(MenuId.UPGRADE_MENU)
+            self.upgrade_panel.visible = True
 
         # Update station info if a player-owned station is selected
         if self.upgrade_menu_visible and self.selected_entity:
@@ -378,22 +532,13 @@ class Renderer:
         if not self._world or not self.player_faction_id:
             return
 
-        # Close other menus
-        if self.build_menu_visible:
-            self.build_menu_visible = False
-            self.build_menu.visible = False
-            self.cancel_build_mode()
-        if self.ship_menu_visible:
-            self.ship_menu_visible = False
-            self.ship_menu.visible = False
-        if self.upgrade_menu_visible:
-            self.upgrade_menu_visible = False
-            self.upgrade_panel.visible = False
-
-        self.trade_route_visible = not self.trade_route_visible
-        self.trade_route_panel.visible = self.trade_route_visible
-
         if self.trade_route_visible:
+            self.menu_manager.pop(MenuId.TRADE_ROUTE)
+            self.trade_route_panel.visible = False
+        else:
+            self.menu_manager.close_all()
+            self.menu_manager.push(MenuId.TRADE_ROUTE)
+            self.trade_route_panel.visible = True
             self._update_trade_route_panel()
 
     def _update_trade_route_panel(self) -> None:
@@ -503,24 +648,13 @@ class Renderer:
 
     def toggle_help(self) -> None:
         """Toggle the help panel visibility."""
-        self.help_visible = not self.help_visible
-        self.help_panel.visible = self.help_visible
-
-        # Close other menus when opening help
         if self.help_visible:
-            if self.build_menu_visible:
-                self.build_menu_visible = False
-                self.build_menu.visible = False
-                self.cancel_build_mode()
-            if self.ship_menu_visible:
-                self.ship_menu_visible = False
-                self.ship_menu.visible = False
-            if self.upgrade_menu_visible:
-                self.upgrade_menu_visible = False
-                self.upgrade_panel.visible = False
-            if self.trade_route_visible:
-                self.trade_route_visible = False
-                self.trade_route_panel.visible = False
+            self.menu_manager.pop(MenuId.HELP)
+            self.help_panel.visible = False
+        else:
+            self.menu_manager.close_all()
+            self.menu_manager.push(MenuId.HELP)
+            self.help_panel.visible = True
 
     def enter_waypoint_mode(self) -> bool:
         """Enter waypoint mode for the selected ship.
@@ -540,10 +674,10 @@ class Renderer:
             self.add_notification("Select one of your ships first", "warning")
             return False
 
-        # Close other menus
-        self._close_all_menus()
+        # Close other menus and enter waypoint mode
+        self.menu_manager.close_all()
+        self.menu_manager.push(MenuId.WAYPOINT_MODE)
 
-        self.waypoint_mode = True
         self.waypoint_ship_id = self.selected_entity.id
         self.waypoint_ship_name = self.selected_entity.name
 
@@ -558,7 +692,7 @@ class Renderer:
 
     def cancel_waypoint_mode(self) -> None:
         """Cancel waypoint mode."""
-        self.waypoint_mode = False
+        self.menu_manager.pop(MenuId.WAYPOINT_MODE)
         self.waypoint_ship_id = None
         self.waypoint_ship_name = ""
         self.context_prompt.visible = False
@@ -627,13 +761,13 @@ class Renderer:
         if not self._world or not self.player_faction_id:
             return
 
-        # Close other menus
-        self._close_all_menus()
-
-        self.trade_manager_visible = not self.trade_manager_visible
-        self.trade_manager.visible = self.trade_manager_visible
-
         if self.trade_manager_visible:
+            self.menu_manager.pop(MenuId.TRADE_MANAGER)
+            self.trade_manager.visible = False
+        else:
+            self.menu_manager.close_all()
+            self.menu_manager.push(MenuId.TRADE_MANAGER)
+            self.trade_manager.visible = True
             self._update_trade_manager()
 
     def _update_trade_manager(self) -> None:
@@ -728,28 +862,8 @@ class Renderer:
         manual_route.add_waypoint(route['station2_id'], route['station2_name'])
 
     def _close_all_menus(self) -> None:
-        """Close all open menus."""
-        if self.build_menu_visible:
-            self.build_menu_visible = False
-            self.build_menu.visible = False
-            self.cancel_build_mode()
-        if self.ship_menu_visible:
-            self.ship_menu_visible = False
-            self.ship_menu.visible = False
-        if self.upgrade_menu_visible:
-            self.upgrade_menu_visible = False
-            self.upgrade_panel.visible = False
-        if self.trade_route_visible:
-            self.trade_route_visible = False
-            self.trade_route_panel.visible = False
-        if self.help_visible:
-            self.help_visible = False
-            self.help_panel.visible = False
-        if self.trade_manager_visible:
-            self.trade_manager_visible = False
-            self.trade_manager.visible = False
-        if self.waypoint_mode:
-            self.cancel_waypoint_mode()
+        """Close all open menus using the menu manager."""
+        self.menu_manager.close_all()
 
     def render(self, world: World, fps: float) -> None:
         """Render the game state."""
@@ -825,13 +939,18 @@ class Renderer:
                 )
 
     def _render_celestial_bodies(self, world: World) -> None:
-        """Render planets, moons, etc."""
+        """Render planets (moons are hidden - shown as submenu items instead)."""
         from ..solar_system.orbits import Position
         from ..entities.celestial import CelestialBody, get_body_display_radius
+        from ..solar_system.bodies import BodyType
 
         em = world.entity_manager
 
         for entity, body in em.get_all_components(CelestialBody):
+            # Skip moons - they're shown as submenu items in resource selection
+            if body.body_type == BodyType.MOON:
+                continue
+
             pos = em.get_component(entity, Position)
             if not pos:
                 continue
@@ -924,7 +1043,7 @@ class Renderer:
     def _render_ships(self, world: World) -> None:
         """Render ships."""
         from ..solar_system.orbits import Position, Velocity
-        from ..entities.ships import Ship
+        from ..entities.ships import Ship, ShipType
         from ..entities.factions import Faction
 
         em = world.entity_manager
@@ -945,39 +1064,51 @@ class Renderer:
             if not (-50 < screen_x < SCREEN_WIDTH + 50 and -50 < screen_y < SCREEN_HEIGHT + 50):
                 continue
 
-            # Draw ship as triangle
-            size = 5
-            vel = em.get_component(entity, Velocity)
-
-            # Calculate rotation based on velocity
-            if vel and (vel.vx != 0 or vel.vy != 0):
-                angle = math.atan2(-vel.vy, vel.vx)  # Negative vy due to screen coords
-            else:
-                angle = 0
-
-            # Triangle points
-            points = [
-                (screen_x + size * math.cos(angle),
-                 screen_y + size * math.sin(angle)),
-                (screen_x + size * math.cos(angle + 2.5),
-                 screen_y + size * math.sin(angle + 2.5)),
-                (screen_x + size * math.cos(angle - 2.5),
-                 screen_y + size * math.sin(angle - 2.5)),
-            ]
-
             # Use faction color if available, otherwise default ship color
             ship_color = COLORS['ship']
             if ship.owner_faction_id and ship.owner_faction_id in faction_colors:
                 ship_color = faction_colors[ship.owner_faction_id]
 
-            pygame.draw.polygon(self.screen, ship_color, points)
+            # Drones render as small dots
+            if ship.is_drone or ship.ship_type == ShipType.DRONE:
+                # Small filled circle for drones
+                pygame.draw.circle(self.screen, ship_color, (screen_x, screen_y), 2)
 
-            # Draw selection highlight
-            if self.selected_entity and entity.id == self.selected_entity.id:
-                pygame.draw.circle(
-                    self.screen, COLORS['ui_highlight'],
-                    (screen_x, screen_y), size + 4, 2
-                )
+                # Draw selection highlight
+                if self.selected_entity and entity.id == self.selected_entity.id:
+                    pygame.draw.circle(
+                        self.screen, COLORS['ui_highlight'],
+                        (screen_x, screen_y), 6, 2
+                    )
+            else:
+                # Regular ships render as triangles
+                size = 5
+                vel = em.get_component(entity, Velocity)
+
+                # Calculate rotation based on velocity
+                if vel and (vel.vx != 0 or vel.vy != 0):
+                    angle = math.atan2(-vel.vy, vel.vx)  # Negative vy due to screen coords
+                else:
+                    angle = 0
+
+                # Triangle points
+                points = [
+                    (screen_x + size * math.cos(angle),
+                     screen_y + size * math.sin(angle)),
+                    (screen_x + size * math.cos(angle + 2.5),
+                     screen_y + size * math.sin(angle + 2.5)),
+                    (screen_x + size * math.cos(angle - 2.5),
+                     screen_y + size * math.sin(angle - 2.5)),
+                ]
+
+                pygame.draw.polygon(self.screen, ship_color, points)
+
+                # Draw selection highlight
+                if self.selected_entity and entity.id == self.selected_entity.id:
+                    pygame.draw.circle(
+                        self.screen, COLORS['ui_highlight'],
+                        (screen_x, screen_y), size + 4, 2
+                    )
 
     def _render_ui(self, world: World, fps: float) -> None:
         """Render UI elements."""
@@ -1019,6 +1150,10 @@ class Renderer:
         if self.trade_route_visible:
             self._update_trade_route_panel()
             self.trade_route_panel.draw(self.screen, self.font)
+
+        # Draw resource selection panel if visible
+        if self.resource_selection.visible:
+            self.resource_selection.draw(self.screen, self.font)
 
     def _render_build_preview(self, world: World) -> None:
         """Render the station build preview at mouse position."""

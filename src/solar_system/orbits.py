@@ -248,19 +248,19 @@ class NavigationSystem(System):
             if not pos or not vel:
                 continue
 
-            if nav.has_arrived(pos):
-                # Stop at destination
-                vel.vx = 0.0
-                vel.vy = 0.0
-                nav.current_speed = 0.0
-                continue
-
             # Calculate direction and distance to target
             dx = nav.target_x - pos.x
             dy = nav.target_y - pos.y
             dist = math.sqrt(dx * dx + dy * dy)
 
-            if dist <= 0:
+            # Check if arrived (use a slightly larger threshold for fast-moving ships)
+            if nav.has_arrived(pos) or dist <= 0.001:
+                # Snap to target position to prevent drift
+                pos.x = nav.target_x
+                pos.y = nav.target_y
+                vel.vx = 0.0
+                vel.vy = 0.0
+                nav.current_speed = 0.0
                 continue
 
             # Normalize direction
@@ -278,6 +278,18 @@ class NavigationSystem(System):
                 # Accelerate towards max speed
                 nav.current_speed = min(nav.max_speed, nav.current_speed + nav.acceleration * dt_days)
 
-            # Set velocity
-            vel.vx = dir_x * nav.current_speed
-            vel.vy = dir_y * nav.current_speed
+            # Calculate how far we would move this frame
+            frame_distance = nav.current_speed * dt_days
+
+            # If we would overshoot, clamp to the remaining distance
+            if frame_distance >= dist:
+                # Move directly to target
+                pos.x = nav.target_x
+                pos.y = nav.target_y
+                vel.vx = 0.0
+                vel.vy = 0.0
+                nav.current_speed = 0.0
+            else:
+                # Set velocity - MovementSystem will apply it
+                vel.vx = dir_x * nav.current_speed
+                vel.vy = dir_y * nav.current_speed

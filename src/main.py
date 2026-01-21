@@ -444,41 +444,60 @@ def main() -> None:
         running = input_handler.process_events(events)
 
         # Handle quit action and number keys for menus
+        # Use menu manager to dispatch input to the active (topmost) menu only
+        from src.ui.panels import MenuId
+
         for event in events:
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_q:
                     running = False
-                # Number keys for selecting options in menus
-                elif renderer.build_menu_visible:
-                    # Number keys 1-7 for selecting station type in build menu
+                    continue
+
+                # Get active menu from manager - only this menu receives input
+                active_menu = renderer.menu_manager.active_menu
+
+                # Handle Escape - closes the top menu
+                if event.key == pygame.K_ESCAPE and active_menu != MenuId.NONE:
+                    renderer.menu_manager.close_top()
+                    continue
+
+                # Dispatch input to active menu only
+                if active_menu == MenuId.RESOURCE_SELECTION:
+                    # Number keys 1-9 for selecting mining resource
+                    if event.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4,
+                                     pygame.K_5, pygame.K_6, pygame.K_7, pygame.K_8, pygame.K_9):
+                        index = event.key - pygame.K_1
+                        renderer.select_mining_resource(index, world)
+
+                elif active_menu == MenuId.BUILD_MENU:
+                    # Number keys 1-7 for selecting station type
                     if event.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4,
                                      pygame.K_5, pygame.K_6, pygame.K_7):
                         index = event.key - pygame.K_1
                         renderer.select_build_option(index)
-                elif renderer.ship_menu_visible:
-                    # Number keys 1-5 for selecting ship type in ship menu
+
+                elif active_menu == MenuId.SHIP_MENU:
+                    # Number keys 1-5 for selecting ship type
                     if event.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4, pygame.K_5):
                         index = event.key - pygame.K_1
                         renderer.select_ship_option(index)
-                elif renderer.upgrade_menu_visible:
+
+                elif active_menu == MenuId.UPGRADE_MENU:
                     # Number keys 1-3 for selecting upgrade option
                     if event.key in (pygame.K_1, pygame.K_2, pygame.K_3):
                         index = event.key - pygame.K_1
                         renderer.select_upgrade_option(index)
-                elif renderer.trade_route_visible:
-                    # Trade route panel controls (old panel - keeping for compatibility)
+
+                elif active_menu == MenuId.TRADE_ROUTE:
+                    # Trade route panel controls
                     if renderer.trade_route_panel.add_mode:
-                        # Selecting station to add
                         if event.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4,
                                          pygame.K_5, pygame.K_6):
                             index = event.key - pygame.K_1
                             renderer.trade_route_panel.select_waypoint(index)
                         elif event.key == pygame.K_RETURN or event.key == pygame.K_KP_ENTER:
                             renderer.trade_route_add_waypoint()
-                        elif event.key == pygame.K_ESCAPE:
-                            renderer.trade_route_panel.add_mode = False
                     else:
-                        # Normal mode
                         if event.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4, pygame.K_5):
                             index = event.key - pygame.K_1
                             renderer.trade_route_panel.select_waypoint(index)
@@ -488,15 +507,14 @@ def main() -> None:
                             renderer.trade_route_delete_waypoint()
                         elif event.key == pygame.K_c:
                             renderer.trade_route_clear()
-                elif renderer.trade_manager_visible:
+
+                elif active_menu == MenuId.TRADE_MANAGER:
                     # Trade manager controls
                     if renderer.trade_manager.assigning_ship:
-                        # Ship selection mode - 1-5 to select ship
                         if event.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4, pygame.K_5):
                             index = event.key - pygame.K_1
                             renderer.trade_manager_assign_ship_by_index(index)
                     elif not renderer.trade_manager.creating_route:
-                        # Normal mode - 1-8 to select route and assign ship
                         if event.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4,
                                          pygame.K_5, pygame.K_6, pygame.K_7, pygame.K_8):
                             index = event.key - pygame.K_1
@@ -505,22 +523,22 @@ def main() -> None:
                         elif event.key == pygame.K_d:
                             renderer.trade_manager.delete_selected_route()
 
+                elif active_menu == MenuId.WAYPOINT_MODE:
+                    # Waypoint mode doesn't need number keys, just click handling
+                    pass
+
+                elif active_menu == MenuId.HELP:
+                    # Help panel doesn't need input, ESC already handled above
+                    pass
+
         # Update mouse world position for renderer
         renderer.update_mouse_position(
             input_handler.state.mouse_world_x,
             input_handler.state.mouse_world_y
         )
 
-        # Disable keyboard panning when menus or modes are active
-        input_handler.keyboard_pan_enabled = not (
-            renderer.trade_route_visible or
-            renderer.build_menu_visible or
-            renderer.ship_menu_visible or
-            renderer.upgrade_menu_visible or
-            renderer.help_visible or
-            renderer.waypoint_mode or
-            renderer.trade_manager_visible
-        )
+        # Disable keyboard panning when any menu or mode is active
+        input_handler.keyboard_pan_enabled = not renderer.menu_manager.has_open_menu()
 
         # Update simulation
         dt = clock.tick(FPS) / 1000.0  # Delta time in seconds

@@ -254,7 +254,6 @@ class FactionAI(System):
         """
         from ..entities.celestial import CelestialBody
         from ..solar_system.bodies import SOLAR_SYSTEM_DATA
-        from ..systems.building import MIN_STATION_DISTANCE
 
         best_score = -float('inf')
         best_location = None
@@ -274,21 +273,8 @@ class FactionAI(System):
             if body.body_type.value == "star":
                 continue
 
-            # Check if position is valid (not too close to other stations)
             # Offset slightly from body center
             test_position = (pos.x + 0.05, pos.y + 0.05)
-
-            if not self._is_position_valid(test_position, entity_manager, MIN_STATION_DISTANCE):
-                # Try other offsets
-                offsets = [(0.05, -0.05), (-0.05, 0.05), (-0.05, -0.05), (0.08, 0), (0, 0.08)]
-                valid = False
-                for ox, oy in offsets:
-                    test_position = (pos.x + ox, pos.y + oy)
-                    if self._is_position_valid(test_position, entity_manager, MIN_STATION_DISTANCE):
-                        valid = True
-                        break
-                if not valid:
-                    continue
 
             # Score this location
             score = self._score_location(
@@ -306,29 +292,6 @@ class FactionAI(System):
                 best_location = (test_position, body_name, resource_type)
 
         return best_location
-
-    def _is_position_valid(
-        self,
-        position: tuple[float, float],
-        entity_manager: EntityManager,
-        min_distance: float
-    ) -> bool:
-        """Check if a position is far enough from existing stations."""
-        px, py = position
-
-        for entity, station in entity_manager.get_all_components(Station):
-            pos = entity_manager.get_component(entity, Position)
-            if not pos:
-                continue
-
-            dx = pos.x - px
-            dy = pos.y - py
-            distance = math.sqrt(dx * dx + dy * dy)
-
-            if distance < min_distance:
-                return False
-
-        return True
 
     def _score_location(
         self,

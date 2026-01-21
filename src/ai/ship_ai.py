@@ -97,6 +97,9 @@ class ShipAI(System):
             # If following manual route, advance to next waypoint
             if manual_route and manual_route.waypoints:
                 self._handle_manual_route_arrival(ship_entity, manual_route, entity_manager)
+            # Handle drone arrival (cargo pickup/delivery)
+            elif ship.is_drone:
+                self._handle_drone_arrival(ship_entity, ship, entity_manager, state)
             # Notify trader of arrival
             elif trader:
                 notify_ship_arrived(trader)
@@ -109,6 +112,9 @@ class ShipAI(System):
         # Check for manual route first
         if manual_route and manual_route.waypoints:
             self._handle_manual_route(ship_entity, ship, manual_route, entity_manager, state)
+        # Drones have special local-only behavior
+        elif ship.is_drone:
+            self._handle_drone_behavior(ship_entity, ship, entity_manager, state)
         # Otherwise use automatic trading behavior
         elif trader:
             self._handle_trading_behavior(ship_entity, ship, trader, entity_manager, state)
@@ -246,6 +252,178 @@ class ShipAI(System):
             max_speed=ship.max_speed,
             acceleration=ship.acceleration,
         ))
+
+    def _handle_drone_behavior(
+        self,
+        ship_entity: Entity,
+        ship: Ship,
+        entity_manager: EntityManager,
+        state: ShipAIState
+    ) -> None:
+        """Handle drone ship behavior - local hauling for home station."""
+        from ..solar_system.bodies import SolarSystemData
+
+        state.behavior = ShipBehavior.TRADING
+        pos = entity_manager.get_component(ship_entity, Position)
+        cargo = entity_manager.get_component(ship_entity, CargoHold)
+
+        if not pos or not cargo:
+            return
+
+        # Get home station
+        if not ship.home_station_id:
+            return
+
+        home_station = entity_manager.get_entity(ship.home_station_id)
+        if not home_station:
+            return
+
+        home_pos = entity_manager.get_component(home_station, Position)
+        home_station_comp = entity_manager.get_component(home_station, Station)
+        home_inv = entity_manager.get_component(home_station, Inventory)
+
+        if not home_pos or not home_station_comp or not home_inv:
+            return
+
+        # Get what resources the home station's production needs
+        from ..simulation.production import get_station_input_resources
+        station_type_str = home_station_comp.station_type.value
+        needed_input_types = get_station_input_resources(station_type_str)
+        needed_resources = []
+
+        for resource in needed_input_types:
+            current = home_inv.get(resource)
+            if current < 20:  # Need more if below threshold
+                needed_resources.append(resource)
+
+        # If cargo is not empty, deliver to home station
+        if not cargo.is_empty:
+            # Navigate to home station to deliver
+            state.target_entity_id = home_station.id
+            entity_manager.add_component(ship_entity, NavigationTarget(
+                target_x=home_pos.x,
+                target_y=home_pos.y,
+                max_speed=ship.max_speed,
+                acceleration=ship.acceleration,
+            ))
+            return
+
+        # If we need resources, find a local station that has them
+        if needed_resources:
+            best_source = None
+            best_dist = float('inf')
+            best_resource = None
+
+            for entity, station in entity_manager.get_all_components(Station):
+                # Skip home station
+                if entity.id == home_station.id:
+                    continue
+
+                # Only consider stations in same planetary system
+                station_body = station.parent_body
+                if ship.local_system:
+                    station_planet = SolarSystemData.get_nearest_planet(station_body)
+                    if station_planet != ship.local_system:
+                        continue
+
+                # Check if this station has resources we need
+                station_inv = entity_manager.get_component(entity, Inventory)
+                station_pos = entity_manager.get_component(entity, Position)
+
+                if not station_inv or not station_pos:
+                    continue
+
+                for resource in needed_resources:
+                    available = station_inv.get(resource)
+                    if available > 5:  # Has enough to share
+                        dist = pos.distance_to(station_pos)
+                        if dist < best_dist:
+                            best_dist = dist
+                            best_source = entity
+                            best_resource = resource
+
+            if best_source:
+                source_pos = entity_manager.get_component(best_source, Position)
+                if source_pos:
+                    state.target_entity_id = best_source.id
+                    entity_manager.add_component(ship_entity, NavigationTarget(
+                        target_x=source_pos.x,
+                        target_y=source_pos.y,
+                        max_speed=ship.max_speed,
+                        acceleration=ship.acceleration,
+                    ))
+                    return
+
+        # Nothing to do - hang around home station
+        dist_to_home = pos.distance_to(home_pos)
+        if dist_to_home > 0.05:
+            state.target_entity_id = home_station.id
+            entity_manager.add_component(ship_entity, NavigationTarget(
+                target_x=home_pos.x,
+                target_y=home_pos.y,
+                max_speed=ship.max_speed,
+                acceleration=ship.acceleration,
+            ))
+
+    def _handle_drone_arrival(
+        self,
+        ship_entity: Entity,
+        ship: Ship,
+        entity_manager: EntityManager,
+        state: ShipAIState
+    ) -> None:
+        """Handle drone arriving at a station - pickup or deliver cargo."""
+        cargo = entity_manager.get_component(ship_entity, CargoHold)
+        if not cargo:
+            return
+
+        # Get the station we arrived at
+        if not state.target_entity_id:
+            return
+
+        target_station = entity_manager.get_entity(state.target_entity_id)
+        if not target_station:
+            return
+
+        target_inv = entity_manager.get_component(target_station, Inventory)
+        if not target_inv:
+            return
+
+        # Check if this is our home station
+        is_home = state.target_entity_id == ship.home_station_id
+
+        if is_home:
+            # Deliver all cargo to home station
+            for resource, amount in list(cargo.cargo.items()):
+                if amount > 0:
+                    delivered = cargo.remove_cargo(resource, amount)
+                    target_inv.add(resource, delivered)
+        else:
+            # Pick up resources from this station
+            # Get what the home station needs
+            if ship.home_station_id:
+                home_station = entity_manager.get_entity(ship.home_station_id)
+                if home_station:
+                    home_comp = entity_manager.get_component(home_station, Station)
+                    home_inv = entity_manager.get_component(home_station, Inventory)
+
+                    if home_comp and home_inv:
+                        from ..simulation.production import get_station_input_resources
+                        station_type_str = home_comp.station_type.value
+                        needed_resources = get_station_input_resources(station_type_str)
+
+                        # Pick up resources the home station needs
+                        for resource in needed_resources:
+                            available = target_inv.get(resource)
+                            space = cargo.free_space
+                            # Take up to half of what's available or fill cargo
+                            take_amount = min(available * 0.5, space, 10)
+                            if take_amount > 1:
+                                taken = target_inv.remove(resource, take_amount)
+                                cargo.add_cargo(resource, taken)
+
+        # Small wait before next action
+        state.wait_time = 3.0
 
     def _handle_idle_behavior(
         self,

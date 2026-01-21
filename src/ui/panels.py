@@ -1,7 +1,8 @@
 """UI panels and menus."""
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from enum import Enum, auto
+from typing import TYPE_CHECKING, Callable
 from uuid import UUID
 import pygame
 
@@ -14,6 +15,108 @@ if TYPE_CHECKING:
     from ..core.ecs import Entity
     from ..systems.building import BuildingSystem
     from ..entities.factions import Faction
+
+
+class MenuId(Enum):
+    """Identifiers for all menus in the game."""
+    NONE = auto()
+    BUILD_MENU = auto()
+    RESOURCE_SELECTION = auto()
+    SHIP_MENU = auto()
+    UPGRADE_MENU = auto()
+    TRADE_ROUTE = auto()
+    TRADE_MANAGER = auto()
+    HELP = auto()
+    WAYPOINT_MODE = auto()  # Not a menu but a modal mode
+
+
+class MenuManager:
+    """Manages menu focus stack - only the topmost menu receives input.
+
+    This provides a robust system for handling nested menus and modal dialogs.
+    When a menu is opened, it's pushed onto the stack. When closed, it's popped.
+    Only the top menu receives keyboard input.
+    """
+
+    def __init__(self) -> None:
+        self._stack: list[MenuId] = []
+        self._close_callbacks: dict[MenuId, Callable[[], None]] = {}
+
+    def push(self, menu_id: MenuId) -> None:
+        """Push a menu onto the focus stack."""
+        if menu_id not in self._stack:
+            self._stack.append(menu_id)
+
+    def pop(self, menu_id: MenuId | None = None) -> MenuId | None:
+        """Pop a menu from the stack.
+
+        Args:
+            menu_id: If provided, only pop if this is the top menu.
+                    If None, pop whatever is on top.
+
+        Returns:
+            The popped menu ID, or None if nothing was popped.
+        """
+        if not self._stack:
+            return None
+
+        if menu_id is None:
+            return self._stack.pop()
+
+        if self._stack[-1] == menu_id:
+            return self._stack.pop()
+
+        # Menu is in stack but not on top - remove it anyway
+        if menu_id in self._stack:
+            self._stack.remove(menu_id)
+            return menu_id
+
+        return None
+
+    def close_top(self) -> MenuId | None:
+        """Close the topmost menu and call its close callback.
+
+        Returns:
+            The closed menu ID, or None if stack was empty.
+        """
+        if not self._stack:
+            return None
+
+        menu_id = self._stack.pop()
+        if menu_id in self._close_callbacks:
+            self._close_callbacks[menu_id]()
+        return menu_id
+
+    def close_all(self) -> None:
+        """Close all menus, calling callbacks in reverse order."""
+        while self._stack:
+            self.close_top()
+
+    def register_close_callback(self, menu_id: MenuId, callback: Callable[[], None]) -> None:
+        """Register a callback to be called when a menu is closed."""
+        self._close_callbacks[menu_id] = callback
+
+    @property
+    def active_menu(self) -> MenuId:
+        """Get the currently active (topmost) menu."""
+        return self._stack[-1] if self._stack else MenuId.NONE
+
+    def is_active(self, menu_id: MenuId) -> bool:
+        """Check if a specific menu is the active (topmost) one."""
+        return self.active_menu == menu_id
+
+    def is_open(self, menu_id: MenuId) -> bool:
+        """Check if a menu is open (anywhere in the stack)."""
+        return menu_id in self._stack
+
+    def has_open_menu(self) -> bool:
+        """Check if any menu is open."""
+        return len(self._stack) > 0
+
+    @property
+    def stack_depth(self) -> int:
+        """Get the number of open menus."""
+        return len(self._stack)
 
 
 @dataclass
@@ -486,6 +589,121 @@ class BuildMenuPanel(Panel):
         y += 5
 
         hint_text = "Click to place | ESC to cancel"
+        hint_surf = font.render(hint_text, True, (150, 150, 150))
+        surface.blit(hint_surf, (self.x + 10, y))
+
+
+@dataclass
+class ResourceSelectionPanel(Panel):
+    """Panel for selecting which resource to mine when building mining station."""
+    options: list[tuple[str, ResourceType, float]] = field(default_factory=list)  # (body_name, resource, richness)
+    selected_index: int = -1
+    build_position: tuple[float, float] = (0.0, 0.0)
+    parent_body: str = ""
+
+    def __init__(self, x: int, y: int) -> None:
+        super().__init__(
+            x=x, y=y, width=280, height=200, title="Select Resource to Mine"
+        )
+        self.visible = False
+        self.options = []
+        self.selected_index = -1
+        self.build_position = (0.0, 0.0)
+        self.parent_body = ""
+
+    def show_options(
+        self,
+        planet_name: str,
+        position: tuple[float, float]
+    ) -> None:
+        """Show resource options for a planetary system.
+
+        Args:
+            planet_name: Name of the nearest planet
+            position: Build position
+        """
+        from ..solar_system.bodies import SolarSystemData
+
+        self.parent_body = planet_name
+        self.build_position = position
+        self.selected_index = -1
+
+        # Get all resources from planet and its moons
+        self.options = SolarSystemData.get_planetary_system_resources(planet_name)
+
+        # Calculate panel height based on options
+        self.height = max(120, 60 + len(self.options) * 25 + 30)
+        self.visible = True
+
+    def select_option(self, index: int) -> tuple[str, ResourceType] | None:
+        """Select a resource option by index.
+
+        Returns:
+            (body_name, resource_type) tuple if valid, None otherwise
+        """
+        if 0 <= index < len(self.options):
+            self.selected_index = index
+            body_name, resource, _ = self.options[index]
+            return (body_name, resource)
+        return None
+
+    def get_selection(self) -> tuple[str, ResourceType, tuple[float, float]] | None:
+        """Get the current selection.
+
+        Returns:
+            (body_name, resource_type, position) tuple if selected, None otherwise
+        """
+        if 0 <= self.selected_index < len(self.options):
+            body_name, resource, _ = self.options[self.selected_index]
+            return (body_name, resource, self.build_position)
+        return None
+
+    def draw(self, surface: pygame.Surface, font: pygame.font.Font) -> None:
+        """Draw the resource selection menu."""
+        if not self.visible:
+            return
+
+        super().draw(surface, font)
+
+        line_height = font.get_linesize()
+        y = self.y + 30
+
+        if not self.options:
+            no_res_text = "No resources available here"
+            no_res_surf = font.render(no_res_text, True, (150, 150, 150))
+            surface.blit(no_res_surf, (self.x + 10, y))
+            return
+
+        # Draw options
+        for i, (body_name, resource, richness) in enumerate(self.options):
+            is_selected = i == self.selected_index
+
+            if is_selected:
+                color = COLORS['ui_highlight']
+                pygame.draw.rect(
+                    surface, (50, 50, 80),
+                    (self.x + 5, y - 2, self.width - 10, line_height + 2)
+                )
+            else:
+                color = COLORS['ui_text']
+
+            # Format: "1) Mars > Iron Ore (1.3x)"
+            richness_str = f"({richness:.1f}x)" if richness != 1.0 else ""
+            option_text = f"{i + 1}) {body_name} > {resource.value.replace('_', ' ').title()} {richness_str}"
+            option_surf = font.render(option_text, True, color)
+            surface.blit(option_surf, (self.x + 10, y))
+
+            y += line_height + 3
+
+        # Instructions
+        y += 10
+        pygame.draw.line(
+            surface, self.border_color,
+            (self.x + 5, y), (self.x + self.width - 5, y), 1
+        )
+        y += 5
+
+        hint_text = "Press number to select | ESC to cancel"
         hint_surf = font.render(hint_text, True, (150, 150, 150))
         surface.blit(hint_surf, (self.x + 10, y))
 
@@ -1262,7 +1480,7 @@ class HelpPanel(Panel):
                 ("B", "Open build menu"),
                 ("1-7", "Select station type"),
                 ("Left Click", "Place station"),
-                ("Enter", "Confirm placement"),
+                ("1-9", "Select resource (mining)"),
             ]),
             ("SHIPS", [
                 ("S", "Open ship purchase menu"),
