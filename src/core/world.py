@@ -56,7 +56,7 @@ class World:
         self.game_time = GameTime()
         self._systems: list[System] = []
         self._paused: bool = False
-        self._speed: float = 10.0  # Default to 10x speed (10 days/second)
+        self._speed: float = 1.0  # Default to 1x speed (1 day/second)
 
     def add_system(self, system: System) -> None:
         """Add a system to the world."""

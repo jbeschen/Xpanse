@@ -44,52 +44,54 @@ class Ship(Component):
 
 
 # Ship type configurations
-# Speeds in AU per day - at 10x game speed, ~2 AU/day means Earth to Mars in ~15 seconds real-time
+# X-Drive Era: Speeds in AU per day - 1 second = 1 day
+# Earth to Jupiter (~4.2 AU) should take 30-60 seconds for freighters
+# Speed ~0.10 AU/day = ~42 day trip = 42 seconds real-time
 SHIP_CONFIGS: dict[ShipType, dict] = {
     ShipType.SHUTTLE: {
         "cargo_capacity": 50,
-        "max_speed": 4.0,  # Fast but small
-        "acceleration": 1.0,  # Quick to accelerate
+        "max_speed": 0.15,  # Fast courier - Jupiter in ~28 days
+        "acceleration": 0.05,  # Quick to accelerate
         "fuel_capacity": 50,
         "fuel_consumption": 0.05,
         "max_crew": 4,
     },
     ShipType.FREIGHTER: {
         "cargo_capacity": 200,
-        "max_speed": 2.5,  # Good all-rounder
-        "acceleration": 0.6,
+        "max_speed": 0.10,  # Standard hauler - Jupiter in ~42 days
+        "acceleration": 0.03,
         "fuel_capacity": 100,
         "fuel_consumption": 0.1,
         "max_crew": 10,
     },
     ShipType.TANKER: {
         "cargo_capacity": 500,
-        "max_speed": 1.8,  # Slower, carries more
-        "acceleration": 0.4,
+        "max_speed": 0.07,  # Heavy - Jupiter in ~60 days
+        "acceleration": 0.02,
         "fuel_capacity": 150,
         "fuel_consumption": 0.15,
         "max_crew": 8,
     },
     ShipType.BULK_HAULER: {
         "cargo_capacity": 1000,
-        "max_speed": 1.2,  # Slowest, massive cargo
-        "acceleration": 0.3,
+        "max_speed": 0.05,  # Slowest - Jupiter in ~84 days
+        "acceleration": 0.015,
         "fuel_capacity": 200,
         "fuel_consumption": 0.2,
         "max_crew": 15,
     },
     ShipType.MINING_SHIP: {
         "cargo_capacity": 300,
-        "max_speed": 2.0,  # Decent speed
-        "acceleration": 0.5,
+        "max_speed": 0.08,  # Decent - Jupiter in ~52 days
+        "acceleration": 0.025,
         "fuel_capacity": 120,
         "fuel_consumption": 0.12,
         "max_crew": 12,
     },
     ShipType.DRONE: {
         "cargo_capacity": 20,  # Very small capacity
-        "max_speed": 3.0,  # Fast but local only
-        "acceleration": 1.5,  # Quick to accelerate
+        "max_speed": 0.12,  # Fast for local work
+        "acceleration": 0.08,  # Quick to accelerate
         "fuel_capacity": 30,
         "fuel_consumption": 0.02,  # Efficient
         "max_crew": 0,  # Automated
@@ -222,6 +224,7 @@ def set_ship_destination(
     world: World,
     ship_entity: Entity,
     destination: tuple[float, float],
+    target_body: str = "",
 ) -> None:
     """Set a ship's navigation destination.
 
@@ -229,6 +232,7 @@ def set_ship_destination(
         world: The game world
         ship_entity: The ship entity
         destination: (x, y) target position in AU
+        target_body: Optional name of celestial body to track (for predictive navigation)
     """
     em = world.entity_manager
     ship = em.get_component(ship_entity, Ship)
@@ -241,6 +245,7 @@ def set_ship_destination(
     if nav:
         nav.target_x = destination[0]
         nav.target_y = destination[1]
+        nav.target_body_name = target_body
         nav.max_speed = ship.max_speed
         nav.acceleration = ship.acceleration
         # Don't reset current_speed - let ship maintain momentum if already moving
@@ -248,10 +253,50 @@ def set_ship_destination(
         em.add_component(ship_entity, NavigationTarget(
             target_x=destination[0],
             target_y=destination[1],
+            target_body_name=target_body,
             max_speed=ship.max_speed,
             acceleration=ship.acceleration,
             current_speed=0.0,  # Start from rest
         ))
+
+
+def set_ship_destination_body(
+    world: World,
+    ship_entity: Entity,
+    target_body_name: str,
+) -> None:
+    """Set a ship's navigation destination to a celestial body with predictive tracking.
+
+    The ship will track the body's movement and intercept it.
+
+    Args:
+        world: The game world
+        ship_entity: The ship entity
+        target_body_name: Name of the celestial body to navigate to
+    """
+    em = world.entity_manager
+    ship = em.get_component(ship_entity, Ship)
+
+    if not ship:
+        return
+
+    # Find the target body's current position
+    from .celestial import CelestialBody
+    from ..solar_system.orbits import Position
+
+    target_pos = None
+    for entity, _ in em.get_all_components(CelestialBody):
+        if entity.name == target_body_name:
+            pos = em.get_component(entity, Position)
+            if pos:
+                target_pos = (pos.x, pos.y)
+            break
+
+    if not target_pos:
+        return  # Body not found
+
+    # Set destination with body tracking
+    set_ship_destination(world, ship_entity, target_pos, target_body=target_body_name)
 
 
 def get_ship_at_position(

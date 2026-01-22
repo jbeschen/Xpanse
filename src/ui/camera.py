@@ -27,6 +27,10 @@ class Camera:
     pan_start_cam_x: float = 0.0
     pan_start_cam_y: float = 0.0
 
+    # Camera lock - follows a target entity
+    locked_entity_id: object = None  # UUID of entity to follow
+    locked_entity_name: str = ""  # Name for display
+
     def world_to_screen(self, world_x: float, world_y: float) -> tuple[int, int]:
         """Convert world coordinates (AU) to screen coordinates (pixels)."""
         # Offset from camera center
@@ -96,6 +100,9 @@ class Camera:
         self.pan_start_y = screen_y
         self.pan_start_cam_x = self.x
         self.pan_start_cam_y = self.y
+        # Panning unlocks the camera
+        if self.is_locked:
+            self.unlock()
 
     def update_pan(self, screen_x: int, screen_y: int) -> None:
         """Update pan position."""
@@ -202,3 +209,45 @@ class Camera:
             world_y + radius >= min_y and
             world_y - radius <= max_y
         )
+
+    def lock_to_entity(self, entity_id, entity_name: str) -> None:
+        """Lock camera to follow an entity.
+
+        Args:
+            entity_id: UUID of the entity to follow
+            entity_name: Name of the entity (for display)
+        """
+        self.locked_entity_id = entity_id
+        self.locked_entity_name = entity_name
+
+    def unlock(self) -> None:
+        """Unlock camera from following an entity."""
+        self.locked_entity_id = None
+        self.locked_entity_name = ""
+
+    @property
+    def is_locked(self) -> bool:
+        """Check if camera is locked to an entity."""
+        return self.locked_entity_id is not None
+
+    def update_lock(self, entity_manager) -> None:
+        """Update camera position if locked to an entity.
+
+        Args:
+            entity_manager: EntityManager to look up entity position
+        """
+        if not self.locked_entity_id:
+            return
+
+        from ..solar_system.orbits import Position
+
+        entity = entity_manager.get_entity(self.locked_entity_id)
+        if not entity:
+            # Entity no longer exists, unlock
+            self.unlock()
+            return
+
+        pos = entity_manager.get_component(entity, Position)
+        if pos:
+            self.x = pos.x
+            self.y = pos.y

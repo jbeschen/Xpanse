@@ -94,6 +94,69 @@ class NewsItem:
     importance: int = 1  # 1-5, higher = more important
 
 
+@dataclass
+class StoryEvent:
+    """A campaign/story event that pauses the game and requires player acknowledgment.
+
+    Used for major narrative moments, tutorial steps, mission briefings, and rewards.
+    These events freeze the game until the player dismisses them.
+    """
+    id: str
+    title: str
+    body: str  # Main narrative text
+    category: EventCategory
+    image_key: str = ""  # Optional image identifier for future use
+
+    # Campaign progression
+    chapter: int = 0  # Campaign chapter (0 = prologue)
+    sequence: int = 0  # Order within chapter
+
+    # Mission/objective data (optional)
+    objectives: list[str] = field(default_factory=list)  # List of objective descriptions
+    rewards_credits: float = 0.0
+    rewards_resources: dict[ResourceType, float] = field(default_factory=dict)
+
+    # State
+    acknowledged: bool = False  # Player has seen and dismissed this
+    triggered_at: float = 0.0  # Game time when triggered
+
+    # Trigger conditions (for future events)
+    trigger_condition: str = ""  # e.g., "station_built", "credits_reached_100000"
+    trigger_value: float = 0.0  # Associated value for condition
+
+
+# Campaign story events - these are queued and shown in sequence
+STORY_EVENTS = {
+    "xdrive_announcement": StoryEvent(
+        id="xdrive_announcement",
+        title="THE X-DRIVE ERA BEGINS",
+        body=(
+            "BREAKTHROUGH: Stellar Propulsion Labs has unveiled the X-Drive, a revolutionary "
+            "propulsion system that will reshape humanity's future.\n\n"
+            "For decades, the outer planets remained tantalizingly out of reach - months of "
+            "travel through the void made colonization impractical. That changes today.\n\n"
+            "With the X-Drive, Jupiter is now just 40 days away. Saturn in 90. The entire "
+            "solar system lies open before us.\n\n"
+            "Corporations are already mobilizing. The race to claim the riches of the outer "
+            "system has begun. Mining rights, trade routes, strategic positions - everything "
+            "is up for grabs.\n\n"
+            "As the founder of Stellar Dynamics, you have a unique opportunity. Your small "
+            "fleet of freighters and modest capital could be the foundation of an interplanetary "
+            "empire... or a footnote in someone else's success story.\n\n"
+            "The solar system gold rush has begun. Make your mark."
+        ),
+        category=EventCategory.TECHNOLOGY,
+        chapter=0,
+        sequence=0,
+        objectives=[
+            "Explore the solar system with your freighters",
+            "Establish your first outpost",
+            "Build a profitable trade route",
+        ],
+    ),
+}
+
+
 # Event templates that can be triggered
 EVENT_TEMPLATES = {
     # Economic events
@@ -222,18 +285,53 @@ EVENT_TEMPLATES = {
 
 
 @dataclass
+@dataclass
 class EventManager(Component):
-    """Component that tracks active events, contracts, and discoveries."""
+    """Component that tracks active events, contracts, discoveries, and story events."""
     active_events: list[GameEvent] = field(default_factory=list)
     available_contracts: list[Contract] = field(default_factory=list)
     pending_discoveries: list[Discovery] = field(default_factory=list)
     news_feed: list[NewsItem] = field(default_factory=list)
     event_history: list[GameEvent] = field(default_factory=list)
 
+    # Story/campaign events
+    pending_story_events: list[StoryEvent] = field(default_factory=list)
+    completed_story_events: list[str] = field(default_factory=list)  # IDs of completed events
+    current_story_event: StoryEvent | None = None  # Event currently being displayed
+
     # Counters for unique IDs
     _event_counter: int = 0
     _contract_counter: int = 0
     _discovery_counter: int = 0
+
+    def queue_story_event(self, event: StoryEvent) -> None:
+        """Queue a story event to be shown to the player."""
+        if event.id not in self.completed_story_events:
+            self.pending_story_events.append(event)
+            # Sort by chapter then sequence
+            self.pending_story_events.sort(key=lambda e: (e.chapter, e.sequence))
+
+    def show_next_story_event(self) -> StoryEvent | None:
+        """Pop the next story event to display. Returns None if none pending."""
+        if self.current_story_event is not None:
+            return self.current_story_event  # Already showing one
+
+        if self.pending_story_events:
+            self.current_story_event = self.pending_story_events.pop(0)
+            return self.current_story_event
+
+        return None
+
+    def acknowledge_story_event(self) -> None:
+        """Player has acknowledged the current story event."""
+        if self.current_story_event:
+            self.current_story_event.acknowledged = True
+            self.completed_story_events.append(self.current_story_event.id)
+            self.current_story_event = None
+
+    def has_pending_story(self) -> bool:
+        """Check if there are story events waiting or being shown."""
+        return self.current_story_event is not None or len(self.pending_story_events) > 0
 
 
 class EventSystem(System):
@@ -498,7 +596,7 @@ class EventSystem(System):
 
 
 class DiscoverySystem(System):
-    """System that generates discoveries for traveling ships."""
+    """System that generates discoveries for traveling ships and surveys new bodies."""
 
     priority = 38  # Run before ship AI
 
@@ -507,9 +605,11 @@ class DiscoverySystem(System):
         self._discovery_chance = 0.002  # 0.2% chance per update while traveling
 
     def update(self, dt: float, entity_manager: EntityManager) -> None:
-        """Check for discoveries by traveling ships."""
+        """Check for discoveries by traveling ships and survey bodies."""
         from ..entities.ships import Ship
-        from ..solar_system.orbits import NavigationTarget, Position, Velocity
+        from ..entities.celestial import CelestialBody
+        from ..solar_system.orbits import NavigationTarget, Position, Velocity, ParentBody
+        from .resources import ResourceKnowledge, ResourceDeposit
 
         event_manager = None
         for entity, em in entity_manager.get_all_components(EventManager):
@@ -519,7 +619,27 @@ class DiscoverySystem(System):
         if not event_manager:
             return
 
-        # Check each ship that's traveling
+        # Get resource knowledge singleton
+        knowledge = None
+        for entity, k in entity_manager.get_all_components(ResourceKnowledge):
+            knowledge = k
+            break
+
+        # Check each ship for body surveys (ships that just arrived)
+        if knowledge:
+            for entity, ship in entity_manager.get_all_components(Ship):
+                parent_body = entity_manager.get_component(entity, ParentBody)
+
+                # Ship is docked/orbiting a body - check if we can survey it
+                if parent_body:
+                    body_name = parent_body.parent_name
+                    if knowledge.survey(body_name):
+                        # Newly surveyed! Generate news
+                        self._generate_survey_news(
+                            body_name, ship, event_manager, entity_manager
+                        )
+
+        # Check each ship that's traveling for random discoveries
         for entity, ship in entity_manager.get_all_components(Ship):
             nav = entity_manager.get_component(entity, NavigationTarget)
             vel = entity_manager.get_component(entity, Velocity)
@@ -529,12 +649,51 @@ class DiscoverySystem(System):
             if not nav or not vel or not pos:
                 continue
 
-            if vel.speed < 0.1:  # Must be moving
+            if vel.speed < 0.01:  # Must be moving (reduced for slower X-Drive speeds)
                 continue
 
             # Random discovery check
             if random.random() < self._discovery_chance:
                 self._generate_discovery(entity, ship, pos, event_manager, entity_manager)
+
+    def _generate_survey_news(
+        self,
+        body_name: str,
+        ship,
+        event_manager: EventManager,
+        entity_manager: EntityManager
+    ) -> None:
+        """Generate news for a newly surveyed body."""
+        from ..entities.celestial import CelestialBody
+        from ..solar_system.bodies import SOLAR_SYSTEM_DATA
+        from .resources import ResourceDeposit
+
+        # Get body data for resource info
+        body_data = SOLAR_SYSTEM_DATA.get(body_name)
+        if not body_data:
+            return
+
+        # Build resource description
+        resource_desc = "No significant deposits found."
+        if body_data.resources:
+            resources_str = ", ".join(
+                f"{r.value.replace('_', ' ').title()} (richness: {rich:.1f})"
+                for r, rich in body_data.resources
+            )
+            resource_desc = f"Resources detected: {resources_str}"
+
+        news = NewsItem(
+            headline=f"Survey Complete: {body_name} Resources Catalogued",
+            body=(
+                f"A ship has completed the first detailed survey of {body_name}. "
+                f"{resource_desc} "
+                f"This data is now available to all corporations for mining and development planning."
+            ),
+            timestamp=0.0,  # Will be set by current game time
+            category=EventCategory.DISCOVERY,
+            importance=3,
+        )
+        event_manager.news_feed.insert(0, news)
 
     def _generate_discovery(
         self,

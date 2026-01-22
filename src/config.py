@@ -2,10 +2,14 @@
 from dataclasses import dataclass
 
 # Display settings
-SCREEN_WIDTH = 1280
-SCREEN_HEIGHT = 720
+SCREEN_WIDTH = 1600
+SCREEN_HEIGHT = 1000
 FPS = 60
 TITLE = "Xpanse: Solar System Economic Simulation"
+
+# UI Layout
+TOOLBAR_HEIGHT = 48  # Height of top toolbar
+TOOLBAR_ICON_SIZE = 32  # Size of toolbar icons
 
 # Simulation settings
 SIMULATION_SPEED = 1.0  # Time multiplier
@@ -14,7 +18,7 @@ TICKS_PER_SECOND = 10  # Economic ticks per second
 # Scale: 1 AU = 100 pixels at default zoom
 AU_TO_PIXELS = 100
 MIN_ZOOM = 0.01
-MAX_ZOOM = 10.0
+MAX_ZOOM = 50.0  # Allow much closer zoom for station management
 
 # Economic constants
 BASE_PRICE_VOLATILITY = 0.1

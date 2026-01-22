@@ -5,16 +5,23 @@ from uuid import UUID
 import pygame
 import math
 
-from ..config import COLORS, SCREEN_WIDTH, SCREEN_HEIGHT
+from ..config import COLORS, SCREEN_WIDTH, SCREEN_HEIGHT, TOOLBAR_HEIGHT
 from .camera import Camera
+from .toolbar import Toolbar, ToolbarAction
+from .sector_view import SectorView
 from .panels import (
     InfoPanel, StatusBar, MiniMap, BuildMenuPanel, PlayerHUD,
     ShipPurchasePanel, NotificationPanel, PriceHistoryGraph, UpgradePanel,
     TradeRoutePanel, HelpPanel, ContextPrompt, TradeRouteManagerPanel,
-    ResourceSelectionPanel, MenuManager, MenuId, NewsFeedPanel
+    ResourceSelectionPanel, MenuManager, MenuId, NewsFeedPanel, StoryEventPanel,
+    ShipsListPanel
 )
 from ..entities.stations import StationType
 from ..entities.ships import ShipType
+from ..solar_system.sectors import (
+    ViewMode, SECTORS, get_sector_id_for_body,
+    BELT_INNER_RADIUS, BELT_OUTER_RADIUS, BELT_SECTORS
+)
 
 if TYPE_CHECKING:
     from ..core.world import World
@@ -29,67 +36,91 @@ class Renderer:
         self.screen = screen
         self.camera = camera
 
+        # Get screen dimensions from camera
+        sw = camera.screen_width
+        sh = camera.screen_height
+
         # Initialize font
         pygame.font.init()
         self.font = pygame.font.Font(None, 20)
         self.font_large = pygame.font.Font(None, 28)
 
-        # UI panels
+        # UI panels - positioned relative to screen size
         self.info_panel = InfoPanel(
             x=10, y=120, width=250, height=200, title="Info"
         )
-        self.status_bar = StatusBar(SCREEN_WIDTH, SCREEN_HEIGHT)
-        self.minimap = MiniMap(x=SCREEN_WIDTH - 160, y=10, size=150)
-        self.build_menu = BuildMenuPanel(x=SCREEN_WIDTH - 300, y=170)
+        self.status_bar = StatusBar(sw, sh)
+        self.minimap = MiniMap(x=sw - 160, y=10, size=150)
+        self.build_menu = BuildMenuPanel(x=sw - 300, y=170)
         self.build_menu.visible = False
         self.player_hud = PlayerHUD(x=10, y=10)
-        self.ship_menu = ShipPurchasePanel(x=SCREEN_WIDTH - 300, y=170)
+        self.ship_menu = ShipPurchasePanel(x=sw - 300, y=170)
         self.ship_menu.visible = False
-        self.notifications = NotificationPanel(x=SCREEN_WIDTH // 2 - 150, y=50)
-        self.price_graph = PriceHistoryGraph(x=10, y=SCREEN_HEIGHT - 180)
+        self.notifications = NotificationPanel(x=sw // 2 - 150, y=50)
+        self.price_graph = PriceHistoryGraph(x=10, y=sh - 180)
         self.price_graph.visible = False
-        self.upgrade_panel = UpgradePanel(x=SCREEN_WIDTH - 300, y=170)
+        self.upgrade_panel = UpgradePanel(x=sw - 300, y=170)
         self.upgrade_panel.visible = False
-        self.trade_route_panel = TradeRoutePanel(x=SCREEN_WIDTH - 340, y=170)
+        self.trade_route_panel = TradeRoutePanel(x=sw - 340, y=170)
         self.trade_route_panel.visible = False
-        self.help_panel = HelpPanel(
-            x=SCREEN_WIDTH // 2 - 200, y=SCREEN_HEIGHT // 2 - 240
-        )
+        self.help_panel = HelpPanel(x=sw // 2 - 200, y=sh // 2 - 240)
         self.help_panel.visible = False
-        self.context_prompt = ContextPrompt(
-            x=SCREEN_WIDTH // 2 - 150, y=80
-        )
+        self.context_prompt = ContextPrompt(x=sw // 2 - 150, y=80)
         self.context_prompt.visible = False
-        self.trade_manager = TradeRouteManagerPanel(
-            x=SCREEN_WIDTH - 370, y=170
-        )
+        self.trade_manager = TradeRouteManagerPanel(x=sw - 370, y=170)
         self.trade_manager.visible = False
         self.resource_selection = ResourceSelectionPanel(
-            x=SCREEN_WIDTH // 2 - 140, y=SCREEN_HEIGHT // 2 - 100
+            x=sw // 2 - 140, y=sh // 2 - 100
         )
         self.resource_selection.visible = False
         self.news_feed = NewsFeedPanel(
-            x=SCREEN_WIDTH // 2 - 200, y=SCREEN_HEIGHT // 2 - 200,
+            x=sw // 2 - 200, y=sh // 2 - 200,
             width=400, height=400
         )
         self.news_feed.visible = False
+
+        # Fleet panel (ships list)
+        self.ships_list = ShipsListPanel(x=sw - 370, y=170)
+        self.ships_list.visible = False
+
+        # Story event panel - campaign events that pause the game
+        self.story_event_panel = StoryEventPanel(sw, sh)
 
         # Menu manager - handles focus stack for all menus
         self.menu_manager = MenuManager()
         self._setup_menu_callbacks()
 
+        # Toolbar
+        self.toolbar = Toolbar(sw)
+        self._setup_toolbar_callbacks()
+
+        # Sector view for planetary systems
+        self.sector_view = SectorView(sw, sh)
+        self.view_mode = ViewMode.SECTOR  # Start in sector view (Earth)
+        self.sector_view.enter_sector("earth")  # Default to Earth sector
+
+        # Solar system map hover tracking
+        self.hovered_sector_id: str | None = None
+
         # State
         self.selected_entity: Entity | None = None
         self.show_ui = True
         self.show_orbits = True
-        self.show_labels = True
+        self.show_labels = True  # Master toggle for all labels
         self.show_trade_routes = True  # Show trade route lines
+        self.hover_labels_only = True  # Only show labels when hovering near entities
+
+        # Hover state for labels
+        self.hover_entity_id: UUID | None = None
+        self.hover_distance_threshold = 0.1  # AU distance for hover detection
 
         # Build mode state
         self.build_mode_active = False
         self.selected_station_type: StationType | None = None
         self.mouse_world_x = 0.0
         self.mouse_world_y = 0.0
+        self.mouse_screen_x = 0
+        self.mouse_screen_y = 0
 
         # Waypoint mode state
         self.waypoint_ship_id: UUID | None = None
@@ -130,6 +161,19 @@ class Renderer:
         self.menu_manager.register_close_callback(
             MenuId.NEWS_FEED, self._on_close_news_feed
         )
+        self.menu_manager.register_close_callback(
+            MenuId.SHIPS_LIST, self._on_close_ships_list
+        )
+
+    def _setup_toolbar_callbacks(self) -> None:
+        """Register toolbar button callbacks."""
+        self.toolbar.register_callback(ToolbarAction.BUILD, self.toggle_build_menu)
+        self.toolbar.register_callback(ToolbarAction.SHIPS, self.toggle_ship_menu)
+        self.toolbar.register_callback(ToolbarAction.FLEET, self.toggle_ships_list)
+        self.toolbar.register_callback(ToolbarAction.TRADE, self.toggle_trade_manager)
+        self.toolbar.register_callback(ToolbarAction.NEWS, self.toggle_news_feed)
+        self.toolbar.register_callback(ToolbarAction.HELP, self.toggle_help)
+        # Speed controls are handled by main.py
 
     def _on_close_build_menu(self) -> None:
         """Called when build menu is closed."""
@@ -169,6 +213,10 @@ class Renderer:
     def _on_close_news_feed(self) -> None:
         """Called when news feed is closed."""
         self.news_feed.visible = False
+
+    def _on_close_ships_list(self) -> None:
+        """Called when ships list is closed."""
+        self.ships_list.visible = False
 
     # Menu visibility properties - delegate to menu manager
     @property
@@ -217,6 +265,51 @@ class Renderer:
             self.menu_manager.push(MenuId.NEWS_FEED)
             self.news_feed.visible = True
 
+    def toggle_ships_list(self) -> None:
+        """Toggle the ships list (fleet) panel."""
+        if self.ships_list_visible:
+            self.menu_manager.pop(MenuId.SHIPS_LIST)
+            self.ships_list.visible = False
+        else:
+            self.menu_manager.close_all()
+            self.menu_manager.push(MenuId.SHIPS_LIST)
+            self.ships_list.visible = True
+            # Update the ship list when opening
+            self.ships_list.set_player_faction(self.player_faction_id)
+            if self._world:
+                self.ships_list.update_ships(self._world)
+
+    @property
+    def ships_list_visible(self) -> bool:
+        """Check if ships list is visible."""
+        return self.ships_list.visible
+
+    def show_story_event(self, event) -> None:
+        """Show a story event, pausing the game."""
+        self.story_event_panel.show(event)
+        self.menu_manager.close_all()  # Close any other menus
+        self.menu_manager.push(MenuId.STORY_EVENT)
+
+    def hide_story_event(self) -> None:
+        """Hide the current story event."""
+        self.story_event_panel.hide()
+        self.menu_manager.pop(MenuId.STORY_EVENT)
+
+    def is_story_event_active(self) -> bool:
+        """Check if a story event is currently being displayed."""
+        return self.story_event_panel.visible
+
+    def handle_story_event_key(self, key: int) -> bool:
+        """Handle key input for story event. Returns True if event was acknowledged."""
+        if not self.story_event_panel.visible:
+            return False
+
+        action = self.story_event_panel.handle_key(key)
+        if action == "acknowledge":
+            self.hide_story_event()
+            return True
+        return False
+
     def set_player_faction(self, faction_id: UUID | None, world: "World") -> None:
         """Set the player faction for highlighting."""
         self.player_faction_id = faction_id
@@ -234,10 +327,224 @@ class Renderer:
         """Set the building system reference."""
         self.building_system = building_system
 
-    def update_mouse_position(self, world_x: float, world_y: float) -> None:
-        """Update the current mouse world position for build preview."""
+    def handle_resize(self, new_width: int, new_height: int, new_screen: pygame.Surface) -> None:
+        """Handle window resize event.
+
+        Args:
+            new_width: New window width
+            new_height: New window height
+            new_screen: New screen surface
+        """
+        self.screen = new_screen
+
+        # Update camera dimensions
+        self.camera.screen_width = new_width
+        self.camera.screen_height = new_height
+
+        # Update toolbar width
+        self.toolbar.screen_width = new_width
+        self.toolbar._layout_buttons()
+
+        # Update UI element positions
+        self.status_bar = StatusBar(new_width, new_height)
+        self.minimap = MiniMap(x=new_width - 160, y=10, size=150)
+        self.build_menu = BuildMenuPanel(x=new_width - 300, y=170)
+        self.ship_menu = ShipPurchasePanel(x=new_width - 300, y=170)
+        self.notifications = NotificationPanel(x=new_width // 2 - 150, y=50)
+        self.price_graph = PriceHistoryGraph(x=10, y=new_height - 180)
+        self.upgrade_panel = UpgradePanel(x=new_width - 300, y=170)
+        self.trade_route_panel = TradeRoutePanel(x=new_width - 340, y=170)
+        self.help_panel = HelpPanel(x=new_width // 2 - 200, y=new_height // 2 - 240)
+        self.context_prompt = ContextPrompt(x=new_width // 2 - 150, y=80)
+        self.trade_manager = TradeRouteManagerPanel(x=new_width - 370, y=170)
+        self.resource_selection = ResourceSelectionPanel(
+            x=new_width // 2 - 140, y=new_height // 2 - 100
+        )
+        self.news_feed = NewsFeedPanel(
+            x=new_width // 2 - 200, y=new_height // 2 - 200,
+            width=400, height=400
+        )
+        self.story_event_panel = StoryEventPanel(new_width, new_height)
+        self.sector_view.handle_resize(new_width, new_height)
+
+    def update_mouse_position(
+        self,
+        world_x: float,
+        world_y: float,
+        screen_x: int = 0,
+        screen_y: int = 0
+    ) -> None:
+        """Update the current mouse world position for build preview and hover detection."""
         self.mouse_world_x = world_x
         self.mouse_world_y = world_y
+        self.mouse_screen_x = screen_x
+        self.mouse_screen_y = screen_y
+
+    def update(self, dt: float, world: "World") -> None:
+        """Update renderer state (hover detection, toolbar, etc.)."""
+        # Update toolbar
+        self.toolbar.update(dt, self.mouse_screen_x, self.mouse_screen_y)
+        self.toolbar.set_paused(world.paused)
+
+        # Update hover detection for labels
+        self._update_hover_entity(world)
+
+        # Update ships list if visible
+        if self.ships_list_visible:
+            self.ships_list.update_ships(world)
+
+    def _update_hover_entity(self, world: "World") -> None:
+        """Detect which entity the mouse is hovering over."""
+        self.hover_entity_id = None
+
+        if not world:
+            return
+
+        from ..solar_system.orbits import Position
+        from ..entities.celestial import CelestialBody
+        from ..entities.stations import Station
+        from ..entities.ships import Ship
+
+        em = world.entity_manager
+        closest_dist = self.hover_distance_threshold
+        closest_id = None
+
+        # Adjust threshold based on zoom (closer zoom = smaller threshold)
+        threshold = self.hover_distance_threshold / max(1.0, self.camera.zoom * 0.2)
+
+        # Check celestial bodies
+        for entity, _ in em.get_all_components(CelestialBody):
+            pos = em.get_component(entity, Position)
+            if pos:
+                dist = ((pos.x - self.mouse_world_x)**2 + (pos.y - self.mouse_world_y)**2)**0.5
+                if dist < closest_dist:
+                    closest_dist = dist
+                    closest_id = entity.id
+
+        # Check stations (smaller threshold)
+        station_threshold = threshold * 0.5
+        for entity, _ in em.get_all_components(Station):
+            pos = em.get_component(entity, Position)
+            if pos:
+                dist = ((pos.x - self.mouse_world_x)**2 + (pos.y - self.mouse_world_y)**2)**0.5
+                if dist < min(station_threshold, closest_dist):
+                    closest_dist = dist
+                    closest_id = entity.id
+
+        # Check ships (smallest threshold)
+        ship_threshold = threshold * 0.3
+        for entity, _ in em.get_all_components(Ship):
+            pos = em.get_component(entity, Position)
+            if pos:
+                dist = ((pos.x - self.mouse_world_x)**2 + (pos.y - self.mouse_world_y)**2)**0.5
+                if dist < min(ship_threshold, closest_dist):
+                    closest_dist = dist
+                    closest_id = entity.id
+
+        self.hover_entity_id = closest_id
+
+    def handle_toolbar_click(self, screen_x: int, screen_y: int) -> bool:
+        """Handle click on toolbar. Returns True if handled."""
+        return self.toolbar.handle_click(screen_x, screen_y)
+
+    # Sector view methods
+    def enter_sector(self, body_name: str) -> bool:
+        """Enter sector view for a body.
+
+        Args:
+            body_name: Name of any body in the sector (planet or moon)
+
+        Returns:
+            True if sector was entered successfully
+        """
+        sector_id = get_sector_id_for_body(body_name)
+        if not sector_id:
+            return False
+
+        return self.enter_sector_by_id(sector_id)
+
+    def enter_sector_by_id(self, sector_id: str) -> bool:
+        """Enter sector view by sector ID.
+
+        Args:
+            sector_id: ID of the sector to enter
+
+        Returns:
+            True if sector was entered successfully
+        """
+        if sector_id not in SECTORS:
+            return False
+
+        if self.sector_view.enter_sector(sector_id):
+            self.view_mode = ViewMode.SECTOR
+            self.add_notification(f"Entered {self.sector_view.current_sector.name}", "info")
+            return True
+        return False
+
+    def exit_sector(self) -> None:
+        """Exit sector view and return to solar system map."""
+        if self.view_mode == ViewMode.SECTOR:
+            self.view_mode = ViewMode.SOLAR_SYSTEM
+            self.add_notification("Viewing solar system map (M to close)", "info")
+
+    def toggle_solar_system_map(self) -> None:
+        """Toggle between sector view and solar system map."""
+        if self.view_mode == ViewMode.SOLAR_SYSTEM:
+            # Return to last sector (or Earth if none)
+            sector_id = self.sector_view.current_sector_id or "earth"
+            self.enter_sector_by_id(sector_id)
+        else:
+            self.exit_sector()
+
+    def is_in_sector_view(self) -> bool:
+        """Check if currently in sector view."""
+        return self.view_mode == ViewMode.SECTOR
+
+    def get_body_at_screen_sector(self, screen_x: int, screen_y: int) -> str | None:
+        """Get body at screen position in sector view."""
+        if self.view_mode == ViewMode.SECTOR:
+            return self.sector_view.get_body_at_screen(screen_x, screen_y)
+        return None
+
+    def get_station_at_screen_sector(self, screen_x: int, screen_y: int) -> UUID | None:
+        """Get station at screen position in sector view."""
+        if self.view_mode == ViewMode.SECTOR and self._world:
+            return self.sector_view.get_station_at_screen(screen_x, screen_y, self._world)
+        return None
+
+    def get_ship_at_screen_sector(self, screen_x: int, screen_y: int) -> UUID | None:
+        """Get ship at screen position in sector view."""
+        if self.view_mode == ViewMode.SECTOR and self._world:
+            return self.sector_view.get_ship_at_screen(screen_x, screen_y, self._world)
+        return None
+
+    def get_hovered_sector_at_screen(self, screen_x: int, screen_y: int, world: "World") -> str | None:
+        """Get the sector being hovered over on the solar system map.
+
+        Returns the sector_id if hovering over a planet/body that has a sector.
+        """
+        if self.view_mode != ViewMode.SOLAR_SYSTEM:
+            return None
+
+        from ..solar_system.orbits import Position
+        from ..entities.celestial import CelestialBody
+
+        em = world.entity_manager
+        world_x, world_y = self.camera.screen_to_world(screen_x, screen_y)
+
+        # Check celestial bodies for hover
+        for entity, body in em.get_all_components(CelestialBody):
+            pos = em.get_component(entity, Position)
+            if pos:
+                dist = ((pos.x - world_x)**2 + (pos.y - world_y)**2)**0.5
+                # Hover threshold based on zoom
+                threshold = 0.15 / max(1.0, self.camera.zoom * 0.1)
+                if dist < threshold:
+                    sector_id = get_sector_id_for_body(entity.name)
+                    if sector_id:
+                        return sector_id
+
+        return None
 
     def toggle_build_menu(self) -> None:
         """Toggle the build menu visibility."""
@@ -309,6 +616,97 @@ class Renderer:
         # For non-mining stations, build directly
         return self._complete_station_build(world_x, world_y, world, parent_body, None)
 
+    def try_place_station_at_body(self, body_name: str, world: "World") -> bool:
+        """Try to place a station at the specified body (for sector view building).
+
+        Args:
+            body_name: Name of the celestial body to build at
+            world: The game world
+
+        Returns:
+            True if station was placed successfully (or resource menu shown)
+        """
+        if not self.build_mode_active or not self.selected_station_type:
+            return False
+
+        if not self.building_system or not self.player_faction_id:
+            return False
+
+        # Get the body's position for the build system
+        from ..solar_system.orbits import Position
+        from ..entities.celestial import CelestialBody
+
+        body_pos = None
+        for entity, body in world.entity_manager.get_all_components(CelestialBody):
+            if entity.name == body_name:
+                pos = world.entity_manager.get_component(entity, Position)
+                if pos:
+                    body_pos = (pos.x, pos.y)
+                break
+
+        if not body_pos:
+            self.add_notification(f"Cannot find body: {body_name}", "error")
+            return False
+
+        # For mining stations, show resource selection menu
+        if self.selected_station_type == StationType.MINING_STATION:
+            from ..solar_system.bodies import BodyType, SOLAR_SYSTEM_DATA
+
+            # Find the planet (not moon) for the planetary system
+            body_data = SOLAR_SYSTEM_DATA.get(body_name)
+            if body_data and body_data.body_type == BodyType.MOON:
+                planet_name = body_data.parent
+            else:
+                planet_name = body_name
+
+            if planet_name:
+                # Show resource selection - pass the actual body to build at
+                self.resource_selection.show_options(planet_name, body_pos)
+                # Store the target body for later
+                self._pending_build_body = body_name
+                self.menu_manager.push(MenuId.RESOURCE_SELECTION)
+                return True
+
+        # For non-mining stations, build directly at the body
+        return self._complete_station_build_at_body(body_name, body_pos, world, None)
+
+    def _complete_station_build_at_body(
+        self,
+        body_name: str,
+        position: tuple[float, float],
+        world: "World",
+        resource_type
+    ) -> bool:
+        """Complete station building at a specific body.
+
+        Returns:
+            True if station was placed successfully
+        """
+        if not self.building_system or not self.player_faction_id:
+            return False
+
+        # Request the build
+        result = self.building_system.request_build(
+            world=world,
+            faction_id=self.player_faction_id,
+            station_type=self.selected_station_type,
+            position=position,
+            parent_body=body_name,
+            resource_type=resource_type,
+        )
+
+        if result.success:
+            self.add_notification(result.message, "success")
+            # Exit build mode after successful build
+            self.cancel_build_mode()
+            # Close build menu
+            self.menu_manager.pop(MenuId.BUILD_MENU)
+            self.build_menu.visible = False
+            return True
+        else:
+            self.add_notification(result.message, "error")
+            return False
+
     def select_mining_resource(self, index: int, world: "World") -> bool:
         """Handle resource selection for mining station.
 
@@ -333,11 +731,20 @@ class Renderer:
         self.menu_manager.pop(MenuId.RESOURCE_SELECTION)
         self.resource_selection.visible = False
 
-        # Build the mining station with selected resource
-        success = self._complete_station_build(
-            position[0], position[1], world,
-            body_name, resource_type
-        )
+        # Check if we have a pending sector build
+        pending_body = getattr(self, '_pending_build_body', None)
+        if pending_body:
+            # Building in sector view - use the body-based method
+            success = self._complete_station_build_at_body(
+                body_name, position, world, resource_type
+            )
+            self._pending_build_body = None
+        else:
+            # Building in solar system view
+            success = self._complete_station_build(
+                position[0], position[1], world,
+                body_name, resource_type
+            )
 
         if success:
             self.resource_selection.visible = False
@@ -756,23 +1163,48 @@ class Renderer:
             )
             em.add_component(ship_entity, nav)
 
-        # Set the target
+        # Set the target coordinates
         nav.target_x = world_x
         nav.target_y = world_y
         nav.max_speed = max_speed
         nav.acceleration = acceleration
+        nav.current_speed = 0.0  # Start from rest
 
-        # Try to find what's near the target for notification
+        # Try to find what's near the target - check celestial bodies and stations
         target_name = None
+        target_body_name = ""
+
         from ..entities.stations import Station
-        from ..solar_system.orbits import Position
+        from ..entities.celestial import CelestialBody
+        from ..solar_system.orbits import Position, ParentBody
+
+        # Check celestial bodies first (for body tracking)
+        for body_entity, body in em.get_all_components(CelestialBody):
+            body_pos = em.get_component(body_entity, Position)
+            if body_pos:
+                dist = ((body_pos.x - world_x)**2 + (body_pos.y - world_y)**2)**0.5
+                if dist < 0.15:
+                    target_name = body_entity.name
+                    target_body_name = body_entity.name
+                    break
+
+        # Check stations (closer match overrides body)
         for station_entity, station in em.get_all_components(Station):
             station_pos = em.get_component(station_entity, Position)
             if station_pos:
                 dist = ((station_pos.x - world_x)**2 + (station_pos.y - world_y)**2)**0.5
                 if dist < 0.1:
                     target_name = station_entity.name
+                    # Use station's parent body for tracking
+                    target_body_name = station.parent_body
                     break
+
+        # Set body tracking for predictive navigation
+        nav.target_body_name = target_body_name
+
+        # Remove ParentBody if ship is locked - it will start moving
+        if em.has_component(ship_entity, ParentBody):
+            em.remove_component(ship_entity, ParentBody)
 
         if target_name:
             self.add_notification(f"{self.waypoint_ship_name} heading to {target_name}", "success")
@@ -896,24 +1328,60 @@ class Renderer:
         # Clear screen
         self.screen.fill(COLORS['background'])
 
-        # Render world
-        self._render_orbits(world)
-        self._render_celestial_bodies(world)
+        # Render based on view mode
+        if self.view_mode == ViewMode.SECTOR:
+            # Sector view - square grid with static body positions
+            self.sector_view.update(self.mouse_screen_x, self.mouse_screen_y)
+            # Pass build mode state to sector view
+            self.sector_view.build_mode_active = self.build_mode_active
+            self.sector_view.selected_station_type = self.selected_station_type
+            self.sector_view.render(
+                self.screen, world, self.player_faction_id,
+                self.mouse_screen_x, self.mouse_screen_y
+            )
+        else:
+            # Solar system map view
+            # Update hovered sector
+            self.hovered_sector_id = self.get_hovered_sector_at_screen(
+                self.mouse_screen_x, self.mouse_screen_y, world
+            )
 
-        # Render trade routes (behind stations/ships)
-        if self.show_trade_routes:
-            self._render_trade_routes(world)
+            # Draw belt zone first (behind everything)
+            self._render_belt_zone()
 
-        self._render_stations(world)
-        self._render_ships(world)
+            # Draw orbital paths
+            self._render_orbits(world)
 
-        # Render build preview if in build mode
-        if self.build_mode_active:
-            self._render_build_preview(world)
+            # Draw celestial bodies with sector grid overlays
+            self._render_celestial_bodies(world)
+
+            # Only show ships that are in transit between sectors or
+            # if their sector is being hovered
+            if self.show_trade_routes:
+                self._render_trade_routes(world)
+
+            # Ships shown only when relevant (hovering sector or in transit)
+            self._render_ships_solar_map(world)
 
         # Render UI
         if self.show_ui:
             self._render_ui(world, fps)
+
+        # Render toolbar (always visible, on top of world but below popups)
+        if self.show_ui:
+            # Get player credits for display
+            player_credits = 0.0
+            if self._world and self.player_faction_id:
+                from ..entities.factions import Faction
+                for entity, faction in self._world.entity_manager.get_all_components(Faction):
+                    if entity.id == self.player_faction_id:
+                        player_credits = faction.credits
+                        break
+
+            self.toolbar.render(
+                self.screen, self.font, self.font,
+                world.speed, world.paused, player_credits
+            )
 
         # Update and render notifications (always visible)
         dt = 1.0 / 60.0  # Approximate frame time
@@ -935,6 +1403,35 @@ class Renderer:
         # Render news feed panel
         if self.news_feed_visible:
             self.news_feed.render(self.screen, world)
+
+        # Render ships list (fleet) panel
+        if self.ships_list_visible:
+            self.ships_list.render(self.screen, self.font)
+
+        # Render story event panel (on top of everything - modal)
+        if self.story_event_panel.visible:
+            self.story_event_panel.render(self.screen)
+
+    def _render_belt_zone(self) -> None:
+        """Render the asteroid belt zone as a semi-transparent ring."""
+        # Get sun position (center of solar system)
+        sun_x, sun_y = self.camera.world_to_screen(0, 0)
+
+        # Calculate belt radii in pixels
+        inner_radius = int(BELT_INNER_RADIUS * self.camera.zoom * 100)
+        outer_radius = int(BELT_OUTER_RADIUS * self.camera.zoom * 100)
+
+        # Only draw if belt is visible
+        if outer_radius < 5 or inner_radius > 10000:
+            return
+
+        # Draw belt as multiple concentric semi-transparent circles
+        belt_color = (80, 70, 60)  # Brownish color for asteroids
+        for r in range(inner_radius, outer_radius, max(3, (outer_radius - inner_radius) // 20)):
+            # Vary the alpha/color slightly for texture
+            alpha = 30 + (r % 20)
+            color = (belt_color[0], belt_color[1], belt_color[2])
+            pygame.draw.circle(self.screen, color, (sun_x, sun_y), r, 1)
 
     def _render_orbits(self, world: World) -> None:
         """Render orbital paths."""
@@ -969,7 +1466,7 @@ class Renderer:
                 )
 
     def _render_celestial_bodies(self, world: World) -> None:
-        """Render planets (moons are hidden - shown as submenu items instead)."""
+        """Render planets with sector grid overlays (moons hidden on solar map)."""
         from ..solar_system.orbits import Position
         from ..entities.celestial import CelestialBody, get_body_display_radius
         from ..solar_system.bodies import BodyType
@@ -977,7 +1474,7 @@ class Renderer:
         em = world.entity_manager
 
         for entity, body in em.get_all_components(CelestialBody):
-            # Skip moons - they're shown as submenu items in resource selection
+            # Skip moons - they're only visible in sector view
             if body.body_type == BodyType.MOON:
                 continue
 
@@ -989,14 +1486,57 @@ class Renderer:
             screen_x, screen_y = self.camera.world_to_screen(pos.x, pos.y)
 
             # Skip if off screen
-            if not (-100 < screen_x < SCREEN_WIDTH + 100 and -100 < screen_y < SCREEN_HEIGHT + 100):
+            if not (-100 < screen_x < self.camera.screen_width + 100 and -100 < screen_y < self.camera.screen_height + 100):
                 continue
 
             # Get display radius
             radius = int(get_body_display_radius(body, self.camera.zoom))
 
+            # Check if this body has a sector
+            sector_id = get_sector_id_for_body(entity.name)
+            is_hovered_sector = sector_id and sector_id == self.hovered_sector_id
+
+            # Draw sector grid overlay (light grid around planet to show it's clickable)
+            if sector_id and radius > 5:
+                grid_size = max(radius * 3, 40)
+                grid_color = (50, 60, 80) if not is_hovered_sector else (80, 100, 140)
+
+                # Draw grid box around planet
+                grid_rect = pygame.Rect(
+                    screen_x - grid_size // 2,
+                    screen_y - grid_size // 2,
+                    grid_size,
+                    grid_size
+                )
+                pygame.draw.rect(self.screen, grid_color, grid_rect, 1)
+
+                # Draw subtle grid lines inside
+                cell_size = grid_size // 5
+                for i in range(1, 5):
+                    # Vertical lines
+                    lx = screen_x - grid_size // 2 + i * cell_size
+                    pygame.draw.line(
+                        self.screen, grid_color,
+                        (lx, screen_y - grid_size // 2),
+                        (lx, screen_y + grid_size // 2), 1
+                    )
+                    # Horizontal lines
+                    ly = screen_y - grid_size // 2 + i * cell_size
+                    pygame.draw.line(
+                        self.screen, grid_color,
+                        (screen_x - grid_size // 2, ly),
+                        (screen_x + grid_size // 2, ly), 1
+                    )
+
             # Draw body
             pygame.draw.circle(self.screen, body.color, (screen_x, screen_y), radius)
+
+            # Draw hover highlight for sector
+            if is_hovered_sector:
+                pygame.draw.circle(
+                    self.screen, COLORS['ui_highlight'],
+                    (screen_x, screen_y), radius + 5, 2
+                )
 
             # Draw selection highlight
             if self.selected_entity and entity.id == self.selected_entity.id:
@@ -1005,10 +1545,15 @@ class Renderer:
                     (screen_x, screen_y), radius + 3, 2
                 )
 
-            # Draw label
+            # Draw label - always show on solar system map for navigation
             if self.show_labels and radius > 3:
                 label = self.font.render(entity.name, True, COLORS['ui_text'])
                 self.screen.blit(label, (screen_x + radius + 5, screen_y - 8))
+
+                # Show "Double-click to enter" hint when hovering
+                if is_hovered_sector:
+                    hint = self.font.render("Double-click to enter", True, (150, 180, 200))
+                    self.screen.blit(hint, (screen_x + radius + 5, screen_y + 8))
 
     def _render_stations(self, world: World) -> None:
         """Render stations."""
@@ -1025,7 +1570,7 @@ class Renderer:
             screen_x, screen_y = self.camera.world_to_screen(pos.x, pos.y)
 
             # Skip if off screen
-            if not (-50 < screen_x < SCREEN_WIDTH + 50 and -50 < screen_y < SCREEN_HEIGHT + 50):
+            if not (-50 < screen_x < self.camera.screen_width + 50 and -50 < screen_y < self.camera.screen_height + 50):
                 continue
 
             # Determine station color based on owner
@@ -1065,8 +1610,15 @@ class Renderer:
                     rect.inflate(8, 8), 2
                 )
 
-            # Draw label
-            if self.show_labels and self.camera.zoom > 0.5:
+            # Draw label (hover-based or always on)
+            show_this_label = (
+                self.show_labels and self.camera.zoom > 0.5 and (
+                    not self.hover_labels_only or
+                    self.hover_entity_id == entity.id or
+                    (self.selected_entity and self.selected_entity.id == entity.id)
+                )
+            )
+            if show_this_label:
                 label = self.font.render(entity.name, True, COLORS['ui_text'])
                 self.screen.blit(label, (screen_x + size + 3, screen_y - 8))
 
@@ -1091,7 +1643,7 @@ class Renderer:
             screen_x, screen_y = self.camera.world_to_screen(pos.x, pos.y)
 
             # Skip if off screen
-            if not (-50 < screen_x < SCREEN_WIDTH + 50 and -50 < screen_y < SCREEN_HEIGHT + 50):
+            if not (-50 < screen_x < self.camera.screen_width + 50 and -50 < screen_y < self.camera.screen_height + 50):
                 continue
 
             # Use faction color if available, otherwise default ship color
@@ -1139,6 +1691,98 @@ class Renderer:
                         self.screen, COLORS['ui_highlight'],
                         (screen_x, screen_y), size + 4, 2
                     )
+
+            # Draw ship label (hover-based)
+            show_this_label = (
+                self.show_labels and self.camera.zoom > 2.0 and (
+                    not self.hover_labels_only or
+                    self.hover_entity_id == entity.id or
+                    (self.selected_entity and self.selected_entity.id == entity.id)
+                )
+            )
+            if show_this_label:
+                label = self.font.render(entity.name, True, COLORS['ui_text'])
+                self.screen.blit(label, (screen_x + 8, screen_y - 8))
+
+    def _render_ships_solar_map(self, world: World) -> None:
+        """Render ships on solar system map.
+
+        Only shows ships that are:
+        - In transit (not parked at a body)
+        - In a sector that is being hovered
+        """
+        from ..solar_system.orbits import Position, Velocity, ParentBody, NavigationTarget
+        from ..entities.ships import Ship, ShipType
+        from ..entities.factions import Faction
+
+        em = world.entity_manager
+
+        # Build faction color lookup
+        faction_colors: dict[UUID, tuple[int, int, int]] = {}
+        for faction_entity, faction in em.get_all_components(Faction):
+            faction_colors[faction_entity.id] = faction.color
+
+        for entity, ship in em.get_all_components(Ship):
+            pos = em.get_component(entity, Position)
+            if not pos:
+                continue
+
+            # Check if ship should be shown
+            # 1. Ship is in transit (has NavigationTarget, no ParentBody)
+            # 2. Ship's sector is being hovered
+            parent = em.get_component(entity, ParentBody)
+            nav_target = em.get_component(entity, NavigationTarget)
+
+            # Determine ship's current sector
+            ship_sector_id = None
+            if parent:
+                ship_sector_id = get_sector_id_for_body(parent.parent_name)
+
+            is_in_transit = nav_target is not None and parent is None
+            is_hovered_sector = ship_sector_id and ship_sector_id == self.hovered_sector_id
+
+            # Only show if in transit or sector is hovered
+            if not is_in_transit and not is_hovered_sector:
+                continue
+
+            screen_x, screen_y = self.camera.world_to_screen(pos.x, pos.y)
+
+            # Skip if off screen
+            if not (-50 < screen_x < self.camera.screen_width + 50 and -50 < screen_y < self.camera.screen_height + 50):
+                continue
+
+            # Use faction color
+            ship_color = COLORS['ship']
+            if ship.owner_faction_id and ship.owner_faction_id in faction_colors:
+                ship_color = faction_colors[ship.owner_faction_id]
+
+            # Draw ship as small triangle (simplified for solar map)
+            size = 4
+            vel = em.get_component(entity, Velocity)
+
+            if vel and (vel.vx != 0 or vel.vy != 0):
+                angle = math.atan2(-vel.vy, vel.vx)
+            else:
+                angle = 0
+
+            points = [
+                (screen_x + size * math.cos(angle),
+                 screen_y + size * math.sin(angle)),
+                (screen_x + size * math.cos(angle + 2.5),
+                 screen_y + size * math.sin(angle + 2.5)),
+                (screen_x + size * math.cos(angle - 2.5),
+                 screen_y + size * math.sin(angle - 2.5)),
+            ]
+
+            pygame.draw.polygon(self.screen, ship_color, points)
+
+            # Draw route line for ships in transit
+            if is_in_transit and nav_target:
+                target_x, target_y = self.camera.world_to_screen(nav_target.target_x, nav_target.target_y)
+                pygame.draw.line(
+                    self.screen, (100, 150, 200),
+                    (screen_x, screen_y), (target_x, target_y), 1
+                )
 
     def _render_ui(self, world: World, fps: float) -> None:
         """Render UI elements."""
@@ -1306,9 +1950,8 @@ class Renderer:
 
     def _render_trade_routes(self, world: World) -> None:
         """Render trade route lines from ships to their destinations."""
-        from ..solar_system.orbits import Position
+        from ..solar_system.orbits import Position, NavigationTarget
         from ..entities.ships import Ship
-        from ..ai.ship_ai import ShipAI
 
         em = world.entity_manager
 
@@ -1318,34 +1961,31 @@ class Renderer:
             if not ship_pos:
                 continue
 
-            # Get ship AI to find destination
-            ship_ai = em.get_component(entity, ShipAI)
-            if not ship_ai or not ship_ai.target_entity_id:
+            # Check NavigationTarget component for destination
+            nav_target = em.get_component(entity, NavigationTarget)
+            if not nav_target:
                 continue
 
-            # Find destination entity position
-            dest_pos = None
-            for dest_entity, pos in em.get_all_components(Position):
-                if dest_entity.id == ship_ai.target_entity_id:
-                    dest_pos = pos
-                    break
-
-            if not dest_pos:
+            # Only draw if ship has a valid destination
+            if nav_target.target_x == 0 and nav_target.target_y == 0:
                 continue
 
             # Convert to screen coordinates
             ship_screen = self.camera.world_to_screen(ship_pos.x, ship_pos.y)
-            dest_screen = self.camera.world_to_screen(dest_pos.x, dest_pos.y)
+            dest_screen = self.camera.world_to_screen(nav_target.target_x, nav_target.target_y)
 
             # Skip if both points are off screen
             if not self._line_visible(ship_screen, dest_screen):
                 continue
 
-            # Draw route line (dashed effect via drawing multiple segments)
-            route_color = (100, 150, 255, 128)  # Light blue
-            pygame.draw.line(
-                self.screen, route_color,
-                ship_screen, dest_screen, 1
+            # Draw dotted route line
+            self._draw_dotted_line(
+                self.screen,
+                (100, 150, 255),  # Light blue for travel paths
+                ship_screen,
+                dest_screen,
+                dot_length=8,
+                gap_length=4
             )
 
     def _line_visible(self, p1: tuple[int, int], p2: tuple[int, int]) -> bool:
@@ -1357,8 +1997,58 @@ class Renderer:
         min_y = min(p1[1], p2[1])
         max_y = max(p1[1], p2[1])
 
-        return (max_x >= -margin and min_x <= SCREEN_WIDTH + margin and
-                max_y >= -margin and min_y <= SCREEN_HEIGHT + margin)
+        return (max_x >= -margin and min_x <= self.camera.screen_width + margin and
+                max_y >= -margin and min_y <= self.camera.screen_height + margin)
+
+    def _draw_dotted_line(
+        self,
+        surface: pygame.Surface,
+        color: tuple[int, int, int],
+        start: tuple[int, int],
+        end: tuple[int, int],
+        dot_length: int = 5,
+        gap_length: int = 3
+    ) -> None:
+        """Draw a dotted line between two points.
+
+        Args:
+            surface: Surface to draw on
+            color: Line color
+            start: Start point (x, y)
+            end: End point (x, y)
+            dot_length: Length of each dot segment in pixels
+            gap_length: Length of gap between dots in pixels
+        """
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        length = math.sqrt(dx * dx + dy * dy)
+
+        if length < 1:
+            return
+
+        # Normalize direction
+        dx /= length
+        dy /= length
+
+        segment_length = dot_length + gap_length
+        pos = 0.0
+
+        while pos < length:
+            # Calculate segment start and end
+            seg_start_x = start[0] + dx * pos
+            seg_start_y = start[1] + dy * pos
+            seg_end_pos = min(pos + dot_length, length)
+            seg_end_x = start[0] + dx * seg_end_pos
+            seg_end_y = start[1] + dy * seg_end_pos
+
+            pygame.draw.line(
+                surface, color,
+                (int(seg_start_x), int(seg_start_y)),
+                (int(seg_end_x), int(seg_end_y)),
+                1
+            )
+
+            pos += segment_length
 
     def toggle_price_graph(self) -> None:
         """Toggle price history graph visibility."""

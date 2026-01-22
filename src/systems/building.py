@@ -239,6 +239,14 @@ class BuildingSystem(System):
         if not valid:
             return BuildResult(False, msg)
 
+        # Check if body has space for another station (max 12)
+        if parent_body:
+            from ..entities.station_slots import OrbitalSlotManager
+            for _, slot_mgr in em.get_all_components(OrbitalSlotManager):
+                if slot_mgr.is_full(parent_body):
+                    return BuildResult(False, f"{parent_body} is full (max 12 stations)")
+                break
+
         # Deduct credits
         faction_comp.credits -= cost
 
@@ -247,7 +255,9 @@ class BuildingSystem(System):
             self._consume_materials(material_reqs, faction_inventories)
 
         # Create the station
-        station_name = self._generate_station_name(station_type, parent_body, faction_entity.name)
+        station_name = self._generate_station_name(
+            station_type, parent_body, faction_entity.name, em, resource_type
+        )
 
         if station_type == StationType.MINING_STATION and resource_type:
             station_entity = create_mining_station(
@@ -267,6 +277,12 @@ class BuildingSystem(System):
                 parent_body=parent_body,
                 owner_faction_id=faction_id,
             )
+
+        # Check if station creation failed (e.g., body is full - max 12 stations)
+        if station_entity is None:
+            # Refund credits since we couldn't build
+            faction_comp.credits += cost
+            return BuildResult(False, f"Cannot build at {parent_body} - location is full (max 12 stations)")
 
         # Spawn a drone for refineries and higher-tier stations
         # These automated haulers help get the station operational
@@ -479,27 +495,28 @@ class BuildingSystem(System):
         self,
         station_type: StationType,
         parent_body: str,
-        faction_name: str
+        faction_name: str,
+        entity_manager: EntityManager | None = None,
+        resource_type: ResourceType | None = None,
     ) -> str:
-        """Generate a name for a new station."""
-        type_names = {
-            StationType.OUTPOST: "Outpost",
-            StationType.MINING_STATION: "Mining Station",
-            StationType.REFINERY: "Refinery",
-            StationType.FACTORY: "Factory",
-            StationType.COLONY: "Colony",
-            StationType.SHIPYARD: "Shipyard",
-            StationType.TRADE_HUB: "Trade Hub",
-        }
+        """Generate a sci-fi name for a new station."""
+        from ..entities.station_slots import generate_unique_station_name
 
-        type_name = type_names.get(station_type, "Station")
+        # Collect existing station names to avoid duplicates
+        existing_names: set[str] = set()
+        if entity_manager:
+            for entity, _ in entity_manager.get_all_components(Station):
+                existing_names.add(entity.name)
 
-        if parent_body:
-            return f"{parent_body} {type_name}"
-        else:
-            # Use faction name abbreviation
-            abbrev = "".join(word[0] for word in faction_name.split()[:2])
-            return f"{abbrev} {type_name}"
+        resource_str = resource_type.value if resource_type else None
+
+        return generate_unique_station_name(
+            station_type,
+            parent_body or "Deep Space",
+            existing_names,
+            resource_str,
+            slot_index=len(existing_names) % 12,  # Use station count for variety
+        )
 
     def can_afford(
         self,

@@ -46,7 +46,7 @@ class FactionAI(System):
     def __init__(self, event_bus: EventBus) -> None:
         self.event_bus = event_bus
         self._ai_states: dict[UUID, FactionAIState] = {}
-        self._decision_interval = 30.0  # Seconds between major decisions
+        self._decision_interval = 10.0  # Seconds between major decisions (10 game days)
         self._time_since_decision = 0.0
         self._building_system: "BuildingSystem | None" = None
         self._world: "World | None" = None
@@ -90,9 +90,8 @@ class FactionAI(System):
         total_wealth = self._calculate_wealth(faction_entity.id, faction, entity_manager)
 
         # Decide on goal based on situation
-        if owned_ships < 2:
-            state.current_goal = FactionGoal.TRADE
-        elif owned_stations < 3 and faction.credits > 50000:
+        # With 1+ ships and enough credits, try to expand
+        if owned_stations < 3 and faction.credits > 10000:
             state.current_goal = FactionGoal.EXPAND
         elif total_wealth < 20000:
             state.current_goal = FactionGoal.CONSOLIDATE

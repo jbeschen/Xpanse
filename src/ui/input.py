@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Callable
+import time
 import pygame
 
 if TYPE_CHECKING:
@@ -13,6 +14,7 @@ if TYPE_CHECKING:
 class InputAction(Enum):
     """Input actions that can be triggered."""
     SELECT = "select"
+    DOUBLE_CLICK = "double_click"  # Double-click to lock camera
     CONTEXT_MENU = "context_menu"
     DESELECT = "deselect"
     ZOOM_IN = "zoom_in"
@@ -38,6 +40,8 @@ class InputAction(Enum):
     HELP = "help"  # Toggle help window
     WAYPOINT = "waypoint"  # Set ship waypoint mode
     NEWS = "news"  # Toggle news/events panel
+    TOGGLE_MAP = "toggle_map"  # Toggle solar system map (M key)
+    FLEET = "fleet"  # Toggle fleet panel (F key)
 
 
 @dataclass
@@ -53,6 +57,10 @@ class InputState:
     scroll_delta: int = 0
     keys_pressed: set[int] = field(default_factory=set)
     keys_just_pressed: set[int] = field(default_factory=set)
+    # Double-click tracking
+    last_click_time: float = 0.0
+    last_click_x: int = 0
+    last_click_y: int = 0
 
 
 class InputHandler:
@@ -134,7 +142,25 @@ class InputHandler:
         """Handle mouse button press."""
         if event.button == 1:  # Left click
             self.state.left_click = True
-            self._fire_action(InputAction.SELECT, self.state.mouse_world_x, self.state.mouse_world_y)
+
+            # Check for double-click (within 400ms and 10 pixels)
+            current_time = time.time()
+            time_diff = current_time - self.state.last_click_time
+            dx = abs(event.pos[0] - self.state.last_click_x)
+            dy = abs(event.pos[1] - self.state.last_click_y)
+
+            if time_diff < 0.4 and dx < 10 and dy < 10:
+                # Double-click detected
+                self._fire_action(InputAction.DOUBLE_CLICK, self.state.mouse_world_x, self.state.mouse_world_y)
+                # Reset to prevent triple-click
+                self.state.last_click_time = 0
+            else:
+                # Single click
+                self._fire_action(InputAction.SELECT, self.state.mouse_world_x, self.state.mouse_world_y)
+                # Store click info for double-click detection
+                self.state.last_click_time = current_time
+                self.state.last_click_x = event.pos[0]
+                self.state.last_click_y = event.pos[1]
 
         elif event.button == 2:  # Middle click - start pan
             self.state.middle_click = True
@@ -221,6 +247,12 @@ class InputHandler:
 
         elif event.key == pygame.K_n:
             self._fire_action(InputAction.NEWS)
+
+        elif event.key == pygame.K_m:
+            self._fire_action(InputAction.TOGGLE_MAP)
+
+        elif event.key == pygame.K_f:
+            self._fire_action(InputAction.FLEET)
 
         elif event.key == pygame.K_q:
             self._fire_action(InputAction.QUIT)

@@ -2,8 +2,9 @@
 from __future__ import annotations
 import pygame
 import sys
+import math
 
-from .config import SCREEN_WIDTH, SCREEN_HEIGHT, FPS, TITLE, COLORS
+from .config import SCREEN_WIDTH, SCREEN_HEIGHT, FPS, TITLE, COLORS, TOOLBAR_HEIGHT
 from .core.world import World
 from .core.events import EventBus
 from .solar_system.orbits import OrbitalSystem, MovementSystem, NavigationSystem
@@ -11,6 +12,8 @@ from .simulation.production import ProductionSystem, ExtractionSystem
 from .simulation.economy import EconomySystem, PopulationSystem
 from .simulation.trade import TradeSystem
 from .simulation.events import EventSystem, DiscoverySystem
+from .simulation.goals import GoalSystem, EarthShipyardGoal, GoalStatus
+from .simulation.freelancer import FreelancerSpawner, FreelancerManager
 from .ai.faction_ai import FactionAI
 from .ai.ship_ai import ShipAI
 from .ui.camera import Camera
@@ -172,10 +175,45 @@ def create_competitive_start(world: World) -> dict:
     from .entities.celestial import create_solar_system
     from .entities.factions import create_faction, FactionType
     from .entities.ships import create_ship, ShipType
-    from .entities.stations import create_earth_market
+    from .entities.stations import create_earth_market, create_station, create_mining_station, StationType
+    from .simulation.resources import ResourceKnowledge, ResourceType
+    from .simulation.events import EventManager, STORY_EVENTS
 
     # Create solar system
     bodies = create_solar_system(world)
+
+    # Create ResourceKnowledge singleton - tracks which bodies have been surveyed
+    # Only Moon and Mars have public resource data at start
+    knowledge_entity = world.create_entity(name="ResourceKnowledge", tags={"singleton"})
+    world.entity_manager.add_component(knowledge_entity, ResourceKnowledge())
+
+    # Create OrbitalSlotManager singleton - manages station orbital positions
+    from .entities.station_slots import OrbitalSlotManager
+    slot_entity = world.create_entity(name="OrbitalSlotManager", tags={"singleton"})
+    world.entity_manager.add_component(slot_entity, OrbitalSlotManager())
+
+    # Create EventManager singleton for events, contracts, discoveries
+    event_entity = world.create_entity(name="EventManager", tags={"singleton"})
+    event_manager = EventManager()
+
+    # Queue the X-Drive story event - this will pause the game at start
+    import copy
+    xdrive_event = copy.deepcopy(STORY_EVENTS["xdrive_announcement"])
+    event_manager.queue_story_event(xdrive_event)
+
+    world.entity_manager.add_component(event_entity, event_manager)
+
+    # Get Earth's actual position (it has a random starting angle now)
+    from .solar_system.orbits import Position, ParentBody
+    earth_pos = None
+    for entity in world.entity_manager.get_entities_with(Position):
+        if entity.name == "Earth":
+            earth_pos = world.entity_manager.get_component(entity, Position)
+            break
+
+    if not earth_pos:
+        # Fallback if Earth not found
+        earth_pos = Position(x=1.0, y=0.0)
 
     # Create corporations with equal resources
     corporations = {}
@@ -183,12 +221,7 @@ def create_competitive_start(world: World) -> dict:
 
     # Starting resources for each corporation
     STARTING_CREDITS = 100000
-    STARTING_SHIPS = 2
-
-    # Ship starting positions - spread around Earth's orbit (1 AU)
-    # Each corp gets a slightly different starting angle
-    import math
-    num_corps = len(COMPETITIVE_CORPORATIONS)
+    STARTING_SHIPS = 1  # Each corp starts with 1 ship
 
     for i, (name, config) in enumerate(COMPETITIVE_CORPORATIONS.items()):
         # Create faction
@@ -211,68 +244,168 @@ def create_competitive_start(world: World) -> dict:
         if config["is_player"]:
             player_faction_id = faction.id
 
-        # Calculate starting position - spread around Earth orbit
-        angle = (2 * math.pi * i) / num_corps
-        base_x = 1.0 + 0.1 * math.cos(angle)
-        base_y = 0.1 * math.sin(angle)
-
-        # Create starting ships for this corporation
+        # Create starting ship for this corporation - spread in ring around Earth
         for ship_num in range(STARTING_SHIPS):
-            offset = 0.02 * ship_num
-            ship_position = (base_x + offset, base_y + offset)
+            # Spread ships in a ring pattern around Earth for easier clicking
+            num_corps = len(COMPETITIVE_CORPORATIONS)
+            angle = (i / num_corps) * 2 * math.pi
+            offset_x = 0.05 * math.cos(angle)  # 0.05 AU radius circle
+            offset_y = 0.05 * math.sin(angle)
 
-            create_ship(
+            ship = create_ship(
                 world=world,
                 name=f"{name} Freighter {ship_num + 1}",
                 ship_type=ShipType.FREIGHTER,
-                position=ship_position,
+                position=(earth_pos.x + offset_x, earth_pos.y + offset_y),
                 owner_faction_id=faction.id,
                 is_trader=True,
             )
 
-    # Create Freelancers faction - independent traders
+            # Lock ship to Earth so it appears in sector view
+            world.entity_manager.add_component(ship, ParentBody(
+                parent_name="Earth",
+                offset_x=offset_x,
+                offset_y=offset_y,
+            ))
+
+    # Create Freelancers faction - they'll spawn ships on demand when cargo is available
     freelancers = create_faction(
         world=world,
         name="Freelancers",
         faction_type=FactionType.INDEPENDENT,
         color=(180, 180, 180),
-        credits=500000,
+        credits=100000,  # Modest starting capital
         is_player=False,
     )
     freelancer_id = freelancers.id
 
-    # Create Earth market - the main consumer hub
-    # Earth position is approximately (1, 0) AU
+    # Create Earth market - the main consumer hub (at Earth's actual position)
     earth_market = create_earth_market(
         world=world,
-        position=(1.0, 0.0),
+        position=(earth_pos.x, earth_pos.y),
         owner_faction_id=None,  # Earth market is neutral/public
     )
 
-    # Create Freelancer trading ships - they seek profitable trades
-    freelancer_positions = [
-        (1.05, 0.05),   # Near Earth
-        (0.95, -0.05),  # Near Earth
-        (1.55, 0.1),    # Near Mars orbit
-        (1.45, -0.1),   # Near Mars orbit
-        (2.5, 0.05),    # Belt region
-        (2.8, -0.05),   # Belt region
-    ]
+    # Create initial NPC stations to kickstart the economy
+    # These provide trade opportunities for ships from the start
+    from .simulation.resources import ResourceType
 
-    for i, pos in enumerate(freelancer_positions):
-        create_ship(
+    # Luna Mining Outpost - extracts water ice (Moon is ~0.00257 AU from Earth)
+    luna_offset_x = 0.003  # Slightly offset from Earth
+    luna_offset_y = 0.001
+    luna_mining = create_mining_station(
+        world=world,
+        name="Luna Mining Outpost",
+        position=(earth_pos.x + luna_offset_x, earth_pos.y + luna_offset_y),
+        parent_body="Moon",
+        resource_type=ResourceType.WATER_ICE,
+        owner_faction_id=freelancer_id,
+    )
+    if luna_mining:
+        # Add to Earth's sector (Moon is in Earth sector)
+        world.entity_manager.add_component(luna_mining, ParentBody(
+            parent_name="Moon",
+            offset_x=0.001,
+            offset_y=0.0,
+        ))
+
+    # Earth Orbital Refinery - processes raw materials into refined goods
+    refinery_offset_x = -0.04
+    refinery_offset_y = 0.02
+    earth_refinery = create_station(
+        world=world,
+        name="Earth Orbital Refinery",
+        station_type=StationType.REFINERY,
+        position=(earth_pos.x + refinery_offset_x, earth_pos.y + refinery_offset_y),
+        parent_body="Earth",
+        owner_faction_id=freelancer_id,
+    )
+    if earth_refinery:
+        world.entity_manager.add_component(earth_refinery, ParentBody(
+            parent_name="Earth",
+            offset_x=refinery_offset_x,
+            offset_y=refinery_offset_y,
+        ))
+
+    # Create Earth Shipyard Goal - shipyard will be built when resources are collected
+    goal_entity = world.create_entity(name="EarthShipyardGoal", tags={"goal", "singleton"})
+    world.entity_manager.add_component(goal_entity, EarthShipyardGoal(
+        earth_market_id=earth_market.id,
+        freelancer_faction_id=freelancer_id,
+    ))
+
+    # Create FreelancerManager - handles spawning freelancer ships on demand
+    freelancer_mgr_entity = world.create_entity(name="FreelancerManager", tags={"singleton"})
+    world.entity_manager.add_component(freelancer_mgr_entity, FreelancerManager(
+        freelancer_faction_id=freelancer_id,
+        max_freelancers=10,
+        spawn_interval=5.0,  # 5 game days between spawns
+    ))
+
+    # Spawn initial drones at Earth market for immediate activity
+    from .simulation.trade import CargoHold
+    for drone_num in range(3):
+        drone_angle = (drone_num / 3) * 2 * math.pi + math.pi / 6  # Offset from corp ships
+        drone_offset_x = 0.03 * math.cos(drone_angle)
+        drone_offset_y = 0.03 * math.sin(drone_angle)
+
+        drone = create_ship(
             world=world,
-            name=f"Freelancer {i + 1}",
+            name=f"Earth Drone {drone_num + 1}",
+            ship_type=ShipType.DRONE,
+            position=(earth_pos.x + drone_offset_x, earth_pos.y + drone_offset_y),
+            owner_faction_id=freelancer_id,
+            is_trader=False,
+        )
+
+        # Configure drone for local operations
+        from .entities.ships import Ship
+        ship_comp = world.entity_manager.get_component(drone, Ship)
+        if ship_comp:
+            ship_comp.is_drone = True
+            ship_comp.home_station_id = earth_market.id
+            ship_comp.local_system = "Earth"
+
+        # Add cargo hold for drone hauling
+        world.entity_manager.add_component(drone, CargoHold(capacity=20))
+
+        # Lock to Earth with offset
+        world.entity_manager.add_component(drone, ParentBody(
+            parent_name="Earth",
+            offset_x=drone_offset_x,
+            offset_y=drone_offset_y,
+        ))
+
+    # Spawn initial freelancer ships at Earth for more activity
+    for freelancer_num in range(2):
+        fl_angle = (freelancer_num / 2) * 2 * math.pi + math.pi / 4
+        fl_offset_x = 0.07 * math.cos(fl_angle)
+        fl_offset_y = 0.07 * math.sin(fl_angle)
+
+        freelancer_ship = create_ship(
+            world=world,
+            name=f"Freelancer {freelancer_num + 1}",
             ship_type=ShipType.FREIGHTER,
-            position=pos,
+            position=(earth_pos.x + fl_offset_x, earth_pos.y + fl_offset_y),
             owner_faction_id=freelancer_id,
             is_trader=True,
         )
+
+        # Add cargo hold for trading
+        world.entity_manager.add_component(freelancer_ship, CargoHold(capacity=50))
+
+        # Lock to Earth so it appears in sector view
+        world.entity_manager.add_component(freelancer_ship, ParentBody(
+            parent_name="Earth",
+            offset_x=fl_offset_x,
+            offset_y=fl_offset_y,
+        ))
 
     return {
         "player_faction_id": player_faction_id,
         "corporations": corporations,
         "freelancer_id": freelancer_id,
+        "earth_market_id": earth_market.id,
     }
 
 
@@ -280,7 +413,15 @@ def main() -> None:
     """Main entry point."""
     # Initialize Pygame
     pygame.init()
-    screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+
+    # Get display info for dynamic sizing
+    display_info = pygame.display.Info()
+    # Use 90% of screen size, but cap at config values
+    screen_w = min(int(display_info.current_w * 0.9), SCREEN_WIDTH)
+    screen_h = min(int(display_info.current_h * 0.9), SCREEN_HEIGHT)
+
+    # Create resizable window
+    screen = pygame.display.set_mode((screen_w, screen_h), pygame.RESIZABLE)
     pygame.display.set_caption(TITLE)
     clock = pygame.time.Clock()
 
@@ -304,6 +445,7 @@ def main() -> None:
     world.add_system(TradeSystem(event_bus))
     world.add_system(EconomySystem(event_bus))
     world.add_system(EventSystem(event_bus))
+    world.add_system(GoalSystem(event_bus))
     world.add_system(building_system)
     world.add_system(faction_ai)
 
@@ -311,21 +453,132 @@ def main() -> None:
     game_state = create_competitive_start(world)
     player_faction_id = game_state["player_faction_id"]
 
+    # Add FreelancerSpawner system (needs world reference)
+    freelancer_spawner = FreelancerSpawner(event_bus, world)
+    world.add_system(freelancer_spawner)
+
     # Connect building system to faction AI
     faction_ai.set_building_system(building_system, world)
 
-    # Set up rendering
-    camera = Camera()
-    camera.fit_bounds(-2, -2, 2, 2)  # Start zoomed to show inner solar system
+    # Set up rendering - start camera locked on Earth
+    camera = Camera(screen_width=screen_w, screen_height=screen_h)
+
+    # Find Earth's position and lock camera to it
+    from src.solar_system.orbits import Position
+    earth_entity = None
+    for entity in world.entity_manager.get_entities_with(Position):
+        if entity.name == "Earth":
+            earth_entity = entity
+            earth_pos = world.entity_manager.get_component(entity, Position)
+            if earth_pos:
+                camera.center_on(earth_pos.x, earth_pos.y)
+                camera.lock_to_entity(entity.id, "Earth")
+            break
+
+    # Zoom in to show Earth area nicely (about 0.5 AU visible)
+    camera.zoom = 8.0
 
     renderer = Renderer(screen, camera)
     renderer.set_player_faction(player_faction_id, world)
     renderer.set_building_system(building_system)
 
+    # Subscribe to trade events for visual feedback
+    from src.core.events import TradeCompleteEvent, ResourceTransferEvent
+
+    def on_trade_complete(event: TradeCompleteEvent) -> None:
+        """Show notification when a trade completes."""
+        # Get entity names for the notification
+        buyer = world.entity_manager.get_entity(event.buyer_id)
+        seller = world.entity_manager.get_entity(event.seller_id)
+        buyer_name = buyer.name if buyer else "Unknown"
+        seller_name = seller.name if seller else "Unknown"
+        resource_name = event.resource_type.replace("_", " ").title()
+
+        msg = f"Trade: {event.amount:.0f} {resource_name} sold for {event.total_price:.0f}cr"
+        renderer.notifications.add_notification(msg, duration=4.0, color=(100, 200, 100))
+
+    def on_resource_transfer(event: ResourceTransferEvent) -> None:
+        """Show notification for resource transfers (buying cargo)."""
+        source = world.entity_manager.get_entity(event.source_id)
+        target = world.entity_manager.get_entity(event.target_id)
+        resource_name = event.resource_type.replace("_", " ").title()
+
+        # Only notify for significant transfers
+        if event.amount >= 10:
+            source_name = source.name if source else "Unknown"
+            target_name = target.name if target else "Unknown"
+            msg = f"Cargo: {event.amount:.0f} {resource_name} loaded"
+            renderer.notifications.add_notification(msg, duration=3.0, color=(100, 150, 255))
+
+    event_bus.subscribe(TradeCompleteEvent, on_trade_complete)
+    event_bus.subscribe(ResourceTransferEvent, on_resource_transfer)
+
     input_handler = InputHandler(camera)
+
+    # Wire up toolbar speed controls
+    from src.ui.toolbar import ToolbarAction
+    renderer.toolbar.register_callback(ToolbarAction.PAUSE, lambda: world.toggle_pause())
+    renderer.toolbar.register_callback(ToolbarAction.SPEED_UP, lambda: on_speed_up())
+    renderer.toolbar.register_callback(ToolbarAction.SPEED_DOWN, lambda: on_speed_down())
 
     # Register input callbacks
     def on_select(world_x: float, world_y: float) -> None:
+        # Check if click is on toolbar first
+        if input_handler.state.mouse_y < TOOLBAR_HEIGHT:
+            if renderer.handle_toolbar_click(input_handler.state.mouse_x, input_handler.state.mouse_y):
+                return
+
+        # Handle sector view selection and building
+        if renderer.is_in_sector_view():
+            # In sector view with build mode - find nearest body and build there
+            if renderer.build_mode_active:
+                body_name = renderer.get_body_at_screen_sector(
+                    input_handler.state.mouse_x,
+                    input_handler.state.mouse_y
+                )
+                if body_name:
+                    renderer.try_place_station_at_body(body_name, world)
+                else:
+                    renderer.add_notification("Click on a planet or moon to build", "warning")
+                return
+
+            # In sector view, use screen coordinates for selection
+            # First check for station clicks
+            station_id = renderer.get_station_at_screen_sector(
+                input_handler.state.mouse_x,
+                input_handler.state.mouse_y
+            )
+            if station_id:
+                renderer.sector_view.selected_station_id = station_id
+                renderer.sector_view.selected_body = None
+                # Also update main renderer selection for info panel
+                station_entity = world.entity_manager.get_entity(station_id)
+                if station_entity:
+                    renderer.selected_entity = station_entity
+                    renderer.add_notification(f"Selected {station_entity.name}", "info")
+                return
+
+            # Then check for body clicks
+            body_name = renderer.get_body_at_screen_sector(
+                input_handler.state.mouse_x,
+                input_handler.state.mouse_y
+            )
+            if body_name:
+                renderer.sector_view.selected_body = body_name
+                renderer.sector_view.selected_station_id = None
+                # Find and select the celestial body entity for info panel
+                from src.entities.celestial import CelestialBody
+                for entity, body in world.entity_manager.get_all_components(CelestialBody):
+                    if entity.name == body_name:
+                        renderer.selected_entity = entity
+                        break
+                renderer.add_notification(f"Selected {body_name}", "info")
+            else:
+                renderer.sector_view.selected_body = None
+                renderer.sector_view.selected_station_id = None
+                renderer.selected_entity = None
+            return
+
         # If in waypoint mode, set waypoint
         if renderer.waypoint_mode:
             renderer.set_waypoint(world_x, world_y)
@@ -349,7 +602,7 @@ def main() -> None:
             renderer.select_at(world_x, world_y, world)
 
     def on_deselect() -> None:
-        # Cancel various modes
+        # Cancel various modes in order of priority
         if renderer.waypoint_mode:
             renderer.cancel_waypoint_mode()
         elif renderer.build_mode_active:
@@ -360,8 +613,15 @@ def main() -> None:
             else:
                 renderer.trade_manager_visible = False
                 renderer.trade_manager.visible = False
+        elif not renderer.is_in_sector_view():
+            # In solar system map - close map and return to sector
+            renderer.toggle_solar_system_map()
         else:
+            # In sector view - just deselect
             renderer.deselect()
+            renderer.sector_view.selected_body = None
+            renderer.sector_view.selected_station_id = None
+            renderer.sector_view.selected_ship_id = None
 
     def on_pause() -> None:
         world.toggle_pause()
@@ -393,11 +653,23 @@ def main() -> None:
     def on_confirm_build() -> None:
         # Place station at current mouse position in build mode
         if renderer.build_mode_active:
-            wx, wy = camera.screen_to_world(
-                input_handler.state.mouse_x,
-                input_handler.state.mouse_y
-            )
-            renderer.try_place_station(wx, wy, world)
+            if renderer.is_in_sector_view():
+                # In sector view - build at hovered body
+                body_name = renderer.get_body_at_screen_sector(
+                    input_handler.state.mouse_x,
+                    input_handler.state.mouse_y
+                )
+                if body_name:
+                    renderer.try_place_station_at_body(body_name, world)
+                else:
+                    renderer.add_notification("Hover over a body and press Enter to build", "warning")
+            else:
+                # In solar system view - use world coordinates
+                wx, wy = camera.screen_to_world(
+                    input_handler.state.mouse_x,
+                    input_handler.state.mouse_y
+                )
+                renderer.try_place_station(wx, wy, world)
         # Or purchase selected ship if ship menu is open
         elif renderer.ship_menu_visible:
             renderer.purchase_selected_ship(world)
@@ -443,7 +715,74 @@ def main() -> None:
         else:
             renderer.add_notification("No quicksave found (press F5 to save)", "warning")
 
+    def on_double_click(world_x: float, world_y: float) -> None:
+        """Handle double-click to enter sector from solar map or lock camera on ship."""
+        from src.entities.celestial import CelestialBody
+        from src.entities.ships import Ship
+        from src.solar_system.orbits import Position
+        from src.solar_system.sectors import get_sector_id_for_body
+
+        em = world.entity_manager
+
+        if renderer.is_in_sector_view():
+            # In sector view: double-click only locks camera on ships (not bodies)
+            ship_id = renderer.get_ship_at_screen_sector(
+                input_handler.state.mouse_x,
+                input_handler.state.mouse_y
+            )
+            if ship_id:
+                ship_entity = em.get_entity(ship_id)
+                if ship_entity:
+                    camera.lock_to_entity(ship_id, ship_entity.name)
+                    renderer.add_notification(f"Camera locked to {ship_entity.name}", "info")
+            else:
+                # Double-click on empty space unlocks camera
+                if camera.is_locked:
+                    camera.unlock()
+                    renderer.add_notification("Camera unlocked", "info")
+            return
+
+        # In solar system map: double-click enters sector
+        # Find closest celestial body to click position
+        closest_entity = None
+        closest_dist = 0.2  # AU threshold for clicking
+
+        for entity, body in em.get_all_components(CelestialBody):
+            pos = em.get_component(entity, Position)
+            if pos:
+                dist = ((pos.x - world_x)**2 + (pos.y - world_y)**2)**0.5
+                if dist < closest_dist:
+                    closest_dist = dist
+                    closest_entity = entity
+
+        # If clicked on a body with a sector, enter it
+        if closest_entity:
+            sector_id = get_sector_id_for_body(closest_entity.name)
+            if sector_id:
+                renderer.enter_sector_by_id(sector_id)
+                return
+
+        # Check for ship clicks to follow ships between sectors
+        closest_ship = None
+        closest_ship_dist = 0.1
+
+        for entity, ship in em.get_all_components(Ship):
+            pos = em.get_component(entity, Position)
+            if pos:
+                dist = ((pos.x - world_x)**2 + (pos.y - world_y)**2)**0.5
+                if dist < closest_ship_dist:
+                    closest_ship_dist = dist
+                    closest_ship = entity
+
+        if closest_ship:
+            camera.lock_to_entity(closest_ship.id, closest_ship.name)
+            renderer.add_notification(f"Following {closest_ship.name}", "info")
+        elif camera.is_locked:
+            camera.unlock()
+            renderer.add_notification("Camera unlocked", "info")
+
     input_handler.register_callback(InputAction.SELECT, on_select)
+    input_handler.register_callback(InputAction.DOUBLE_CLICK, on_double_click)
     input_handler.register_callback(InputAction.DESELECT, on_deselect)
     input_handler.register_callback(InputAction.PAUSE, on_pause)
     input_handler.register_callback(InputAction.SPEED_UP, on_speed_up)
@@ -480,16 +819,58 @@ def main() -> None:
     def on_news() -> None:
         renderer.toggle_news_feed()
 
+    def on_fleet() -> None:
+        renderer.toggle_ships_list()
+
+    def on_toggle_map() -> None:
+        # M key toggles solar system map
+        renderer.toggle_solar_system_map()
+
     input_handler.register_callback(InputAction.TRADE_ROUTE, on_trade_route)
     input_handler.register_callback(InputAction.HELP, on_help)
     input_handler.register_callback(InputAction.WAYPOINT, on_waypoint)
     input_handler.register_callback(InputAction.NEWS, on_news)
+    input_handler.register_callback(InputAction.FLEET, on_fleet)
+    input_handler.register_callback(InputAction.TOGGLE_MAP, on_toggle_map)
 
     # Main game loop
     running = True
     while running:
         # Handle input
         events = pygame.event.get()
+
+        # Handle window resize and sector view camera controls
+        for event in events:
+            if event.type == pygame.VIDEORESIZE:
+                screen_w, screen_h = event.w, event.h
+                screen = pygame.display.set_mode((screen_w, screen_h), pygame.RESIZABLE)
+                renderer.handle_resize(screen_w, screen_h, screen)
+                renderer.sector_view.handle_resize(screen_w, screen_h)
+
+            # Sector view camera controls (intercept before main input handler)
+            if renderer.is_in_sector_view():
+                if event.type == pygame.MOUSEWHEEL:
+                    # Zoom sector view
+                    mx, my = pygame.mouse.get_pos()
+                    if event.y > 0:
+                        renderer.sector_view.zoom_in(mx, my)
+                    elif event.y < 0:
+                        renderer.sector_view.zoom_out(mx, my)
+
+                elif event.type == pygame.MOUSEBUTTONDOWN:
+                    if event.button == 3:  # Right click - start pan
+                        mx, my = pygame.mouse.get_pos()
+                        renderer.sector_view.start_pan(mx, my)
+
+                elif event.type == pygame.MOUSEBUTTONUP:
+                    if event.button == 3:  # Right click released - end pan
+                        renderer.sector_view.end_pan()
+
+                elif event.type == pygame.MOUSEMOTION:
+                    if renderer.sector_view.is_panning:
+                        mx, my = pygame.mouse.get_pos()
+                        renderer.sector_view.update_pan(mx, my)
+
         running = input_handler.process_events(events)
 
         # Handle quit action and number keys for menus
@@ -504,6 +885,16 @@ def main() -> None:
 
                 # Get active menu from manager - only this menu receives input
                 active_menu = renderer.menu_manager.active_menu
+
+                # Handle story event first - it blocks all other input
+                if active_menu == MenuId.STORY_EVENT:
+                    if renderer.handle_story_event_key(event.key):
+                        # Story event was acknowledged, check for more
+                        from src.simulation.events import EventManager as EM
+                        for ent, em in world.entity_manager.get_all_components(EM):
+                            em.acknowledge_story_event()
+                            break
+                    continue
 
                 # Handle Escape - closes the top menu
                 if event.key == pygame.K_ESCAPE and active_menu != MenuId.NONE:
@@ -599,18 +990,128 @@ def main() -> None:
                                     )
                             break
 
+                elif active_menu == MenuId.SHIPS_LIST:
+                    # Ships list (fleet) panel keyboard handling
+                    if event.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4,
+                                     pygame.K_5, pygame.K_6, pygame.K_7, pygame.K_8, pygame.K_9):
+                        index = event.key - pygame.K_1
+                        ship_id = renderer.ships_list.select_ship(index)
+                        if ship_id:
+                            # Select the ship in the game world
+                            ship_entity = world.entity_manager.get_entity(ship_id)
+                            if ship_entity:
+                                renderer.selected_entity = ship_entity
+                                renderer.notifications.add_notification(
+                                    f"Selected: {ship_entity.name}",
+                                    duration=2.0
+                                )
+                    elif event.key == pygame.K_RETURN or event.key == pygame.K_KP_ENTER:
+                        # Follow selected ship (camera lock)
+                        ship_id = renderer.ships_list.get_selected_ship_id()
+                        if ship_id:
+                            ship_entity = world.entity_manager.get_entity(ship_id)
+                            if ship_entity:
+                                renderer.selected_entity = ship_entity
+                                renderer.camera.lock_to_entity(ship_entity, world.entity_manager)
+                                renderer.notifications.add_notification(
+                                    f"Following: {ship_entity.name}",
+                                    duration=2.0
+                                )
+                    elif event.key == pygame.K_w:
+                        # Set waypoint for selected ship
+                        ship_id = renderer.ships_list.get_selected_ship_id()
+                        if ship_id:
+                            ship_entity = world.entity_manager.get_entity(ship_id)
+                            if ship_entity:
+                                renderer.selected_entity = ship_entity
+                                renderer.enter_waypoint_mode()
+                    elif event.key == pygame.K_UP:
+                        renderer.ships_list.scroll_up()
+                    elif event.key == pygame.K_DOWN:
+                        renderer.ships_list.scroll_down()
+
         # Update mouse world position for renderer
         renderer.update_mouse_position(
             input_handler.state.mouse_world_x,
-            input_handler.state.mouse_world_y
+            input_handler.state.mouse_world_y,
+            input_handler.state.mouse_x,
+            input_handler.state.mouse_y
         )
 
-        # Disable keyboard panning when any menu or mode is active
-        input_handler.keyboard_pan_enabled = not renderer.menu_manager.has_open_menu()
+        # Update renderer state (hover detection, toolbar)
+        dt_render = 1.0 / FPS
+        renderer.update(dt_render, world)
 
-        # Update simulation
+        # Disable keyboard panning when any menu or mode is active
+        menus_open = renderer.menu_manager.has_open_menu()
+        input_handler.keyboard_pan_enabled = not menus_open and not renderer.is_in_sector_view()
+
+        # Handle keyboard panning for sector view separately (arrow keys only)
+        if renderer.is_in_sector_view() and not menus_open:
+            pan_speed = 10
+            dx, dy = 0, 0
+            if pygame.K_UP in input_handler.state.keys_pressed:
+                dy -= pan_speed
+            if pygame.K_DOWN in input_handler.state.keys_pressed:
+                dy += pan_speed
+            if pygame.K_LEFT in input_handler.state.keys_pressed:
+                dx -= pan_speed
+            if pygame.K_RIGHT in input_handler.state.keys_pressed:
+                dx += pan_speed
+            if dx != 0 or dy != 0:
+                renderer.sector_view.pan_by_screen(dx, dy)
+
+        # Check for pending story events
+        from src.simulation.events import EventManager as EM
+        for entity, em in world.entity_manager.get_all_components(EM):
+            # Try to show next story event if none is currently displayed
+            if not renderer.is_story_event_active():
+                next_event = em.show_next_story_event()
+                if next_event:
+                    renderer.show_story_event(next_event)
+            break
+
+        # Update simulation (paused during story events)
         dt = clock.tick(FPS) / 1000.0  # Delta time in seconds
-        world.update(dt)
+        if not renderer.is_story_event_active():
+            world.update(dt)
+
+        # Update camera lock position (even when paused, to follow moving bodies)
+        camera.update_lock(world.entity_manager)
+
+        if not renderer.is_story_event_active():
+            # Check if Earth shipyard goal is complete - create shipyard
+            for entity, goal in world.entity_manager.get_all_components(EarthShipyardGoal):
+                if goal.status == GoalStatus.COMPLETED and not hasattr(goal, '_shipyard_created'):
+                    goal._shipyard_created = True
+                    # Create the shipyard at Earth
+                    from src.entities.stations import create_station, StationType
+                    from src.solar_system.orbits import Position
+                    from src.simulation.resources import ResourceType
+
+                    # Get Earth position
+                    earth_pos = None
+                    for e in world.entity_manager.get_entities_with(Position):
+                        if e.name == "Earth":
+                            earth_pos = world.entity_manager.get_component(e, Position)
+                            break
+
+                    if earth_pos:
+                        create_station(
+                            world=world,
+                            name="Earth Public Shipyard",
+                            station_type=StationType.SHIPYARD,
+                            position=(earth_pos.x, earth_pos.y - 0.05),
+                            parent_body="Earth",
+                            owner_faction_id=goal.freelancer_faction_id,
+                            initial_resources={
+                                ResourceType.REFINED_METAL: 100,
+                                ResourceType.ELECTRONICS: 50,
+                                ResourceType.MACHINERY: 25,
+                            },
+                        )
+                        renderer.add_notification("Earth Public Shipyard is now operational!", "success")
+                break
 
         # Render
         fps = clock.get_fps()

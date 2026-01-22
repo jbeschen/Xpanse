@@ -127,22 +127,60 @@ def create_station(
     parent_body: str = "",
     owner_faction_id: UUID | None = None,
     initial_resources: dict[ResourceType, float] | None = None,
+    resource_type: ResourceType | None = None,
+    auto_name: bool = False,
 ) -> Entity:
     """Create a station entity.
 
     Args:
         world: The game world
-        name: Station name
+        name: Station name (or base name if auto_name=True)
         station_type: Type of station
         position: (x, y) position in AU
         parent_body: Name of parent celestial body
         owner_faction_id: Owning faction ID
         initial_resources: Starting inventory
+        resource_type: Resource being mined/processed (for naming)
+        auto_name: If True, generate a sci-fi name automatically
 
     Returns:
         The created entity
     """
+    from .station_slots import (
+        OrbitalSlotManager, get_slot_offset, generate_unique_station_name,
+        MAX_STATIONS_PER_BODY
+    )
+
     config = STATION_CONFIGS[station_type]
+    em = world.entity_manager
+
+    # Get or create slot manager
+    slot_manager = None
+    for _, sm in em.get_all_components(OrbitalSlotManager):
+        slot_manager = sm
+        break
+
+    # Determine orbital slot
+    slot_index = 0
+    if parent_body and slot_manager:
+        next_slot = slot_manager.get_next_available_slot(parent_body)
+        if next_slot is None:
+            # Body is full, cannot create station
+            return None
+        slot_index = next_slot
+
+    # Generate name if auto_name is requested
+    if auto_name:
+        # Collect existing station names
+        existing_names = set()
+        for existing_entity, _ in em.get_all_components(Station):
+            existing_names.add(existing_entity.name)
+
+        resource_str = resource_type.value if resource_type else None
+        name = generate_unique_station_name(
+            station_type, parent_body or "Deep Space",
+            existing_names, resource_str, slot_index
+        )
 
     # Create entity
     tags = {"station", station_type.value}
@@ -150,7 +188,6 @@ def create_station(
         tags.add("owned")
 
     entity = world.create_entity(name=name, tags=tags)
-    em = world.entity_manager
 
     # Add station component
     em.add_component(entity, Station(
@@ -162,24 +199,20 @@ def create_station(
     # Add position (will be updated by OrbitalSystem if parent_body is set)
     em.add_component(entity, Position(x=position[0], y=position[1]))
 
-    # Add parent body relationship to lock station to celestial body
+    # Add parent body relationship using orbital slot system
     if parent_body:
-        # Count existing stations around this body to determine offset
-        station_index = 0
-        for existing_entity, existing_station in em.get_all_components(Station):
-            if existing_entity.id != entity.id and existing_station.parent_body == parent_body:
-                station_index += 1
-
-        # Stations appear in a vertical list below the parent body
-        # Small fixed offsets - stations are tiny compared to celestial bodies
-        offset_x = 0.02 + (station_index * 0.01)  # Slight horizontal spread
-        offset_y = 0.03 + (station_index * 0.02)  # Vertical list going down
+        # Get offset from slot system
+        offset_x, offset_y = get_slot_offset(slot_index)
 
         em.add_component(entity, ParentBody(
             parent_name=parent_body,
             offset_x=offset_x,
             offset_y=offset_y,
         ))
+
+        # Register the slot as occupied
+        if slot_manager:
+            slot_manager.occupy_slot(parent_body, slot_index, entity.id)
 
     # Add inventory
     inventory = Inventory(capacity=config["capacity"])
@@ -244,7 +277,7 @@ def create_mining_station(
         owner_faction_id: Owning faction ID
 
     Returns:
-        The created entity
+        The created entity, or None if creation failed (e.g., body full)
     """
     entity = create_station(
         world=world,
@@ -253,7 +286,12 @@ def create_mining_station(
         position=position,
         parent_body=parent_body,
         owner_faction_id=owner_faction_id,
+        resource_type=resource_type,
     )
+
+    # Check if station creation failed (body might be full)
+    if entity is None:
+        return None
 
     em = world.entity_manager
 
@@ -375,5 +413,11 @@ def create_earth_market(
             ResourceType.MACHINERY: 0.05,
         },
     ))
+
+    # Register Earth market with slot manager so new builds don't overlap
+    from .station_slots import OrbitalSlotManager
+    for _, slot_mgr in em.get_all_components(OrbitalSlotManager):
+        slot_mgr.occupy_slot("Earth", 0, entity.id)
+        break
 
     return entity

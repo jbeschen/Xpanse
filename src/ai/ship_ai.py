@@ -52,7 +52,7 @@ class ShipAI(System):
         """Handle ship arrival at destination."""
         if event.ship_id in self._ai_states:
             state = self._ai_states[event.ship_id]
-            state.wait_time = 5.0  # Wait 5 seconds at destination
+            state.wait_time = 1.5  # Wait 1.5 seconds at destination (reduced from 5)
 
     def update(self, dt: float, entity_manager: EntityManager) -> None:
         """Update ship AI."""
@@ -136,8 +136,8 @@ class ShipAI(System):
                 destination_id=state.target_entity_id
             ))
 
-        # Small wait before next action
-        state.wait_time = 2.0
+        # Short wait before next action (reduced from 2.0 for snappier feel)
+        state.wait_time = 1.0
 
     def _handle_manual_route(
         self,
@@ -160,14 +160,19 @@ class ShipAI(System):
             return
 
         target_pos = entity_manager.get_component(target, Position)
+        target_station = entity_manager.get_component(target, Station)
         if not target_pos:
             return
 
-        # Navigate to waypoint
+        # Get parent body for predictive tracking
+        target_body = target_station.parent_body if target_station else ""
+
+        # Navigate to waypoint with body tracking
         state.target_entity_id = target.id
         entity_manager.add_component(ship_entity, NavigationTarget(
             target_x=target_pos.x,
             target_y=target_pos.y,
+            target_body_name=target_body,
             max_speed=ship.max_speed,
             acceleration=ship.acceleration,
         ))
@@ -241,14 +246,19 @@ class ShipAI(System):
             return
 
         target_pos = entity_manager.get_component(target, Position)
+        target_station = entity_manager.get_component(target, Station)
         if not target_pos:
             return
 
-        # Set navigation target
+        # Get parent body for predictive tracking
+        target_body = target_station.parent_body if target_station else ""
+
+        # Set navigation target with body tracking
         state.target_entity_id = target.id
         entity_manager.add_component(ship_entity, NavigationTarget(
             target_x=target_pos.x,
             target_y=target_pos.y,
+            target_body_name=target_body,
             max_speed=ship.max_speed,
             acceleration=ship.acceleration,
         ))
@@ -303,6 +313,7 @@ class ShipAI(System):
             entity_manager.add_component(ship_entity, NavigationTarget(
                 target_x=home_pos.x,
                 target_y=home_pos.y,
+                target_body_name=home_station_comp.parent_body,
                 max_speed=ship.max_speed,
                 acceleration=ship.acceleration,
             ))
@@ -344,26 +355,48 @@ class ShipAI(System):
 
             if best_source:
                 source_pos = entity_manager.get_component(best_source, Position)
+                source_station = entity_manager.get_component(best_source, Station)
                 if source_pos:
+                    source_body = source_station.parent_body if source_station else ""
                     state.target_entity_id = best_source.id
                     entity_manager.add_component(ship_entity, NavigationTarget(
                         target_x=source_pos.x,
                         target_y=source_pos.y,
+                        target_body_name=source_body,
                         max_speed=ship.max_speed,
                         acceleration=ship.acceleration,
                     ))
                     return
 
-        # Nothing to do - hang around home station
+        # Nothing to do - patrol around home station with random movements
+        import random
         dist_to_home = pos.distance_to(home_pos)
-        if dist_to_home > 0.05:
+
+        # If far from home, return
+        if dist_to_home > 0.08:
             state.target_entity_id = home_station.id
             entity_manager.add_component(ship_entity, NavigationTarget(
                 target_x=home_pos.x,
                 target_y=home_pos.y,
+                target_body_name=home_station_comp.parent_body,
                 max_speed=ship.max_speed,
                 acceleration=ship.acceleration,
             ))
+        else:
+            # Random patrol around home station (visible orbiting behavior)
+            patrol_angle = random.uniform(0, 2 * math.pi)
+            patrol_dist = random.uniform(0.02, 0.05)
+            patrol_x = home_pos.x + patrol_dist * math.cos(patrol_angle)
+            patrol_y = home_pos.y + patrol_dist * math.sin(patrol_angle)
+
+            entity_manager.add_component(ship_entity, NavigationTarget(
+                target_x=patrol_x,
+                target_y=patrol_y,
+                target_body_name=home_station_comp.parent_body,
+                max_speed=ship.max_speed * 0.3,  # Slow patrol speed
+                acceleration=ship.acceleration * 0.5,
+            ))
+            state.wait_time = 0.5  # Short wait before next patrol movement
 
     def _handle_drone_arrival(
         self,
@@ -422,8 +455,8 @@ class ShipAI(System):
                                 taken = target_inv.remove(resource, take_amount)
                                 cargo.add_cargo(resource, taken)
 
-        # Small wait before next action
-        state.wait_time = 3.0
+        # Short wait before next action (reduced from 3.0)
+        state.wait_time = 1.5
 
     def _handle_idle_behavior(
         self,
@@ -432,16 +465,17 @@ class ShipAI(System):
         entity_manager: EntityManager,
         state: ShipAIState
     ) -> None:
-        """Handle idle ship behavior."""
-        state.behavior = ShipBehavior.IDLE
+        """Handle idle ship behavior - patrol between nearby stations."""
+        import random
+
+        state.behavior = ShipBehavior.PATROL
         pos = entity_manager.get_component(ship_entity, Position)
 
         if not pos:
             return
 
-        # Find nearest station to hang around
-        nearest_station: Entity | None = None
-        nearest_dist = float('inf')
+        # Collect all stations with their distances
+        stations_by_dist: list[tuple[Entity, float]] = []
 
         for entity, station in entity_manager.get_all_components(Station):
             station_pos = entity_manager.get_component(entity, Position)
@@ -449,20 +483,43 @@ class ShipAI(System):
                 continue
 
             dist = pos.distance_to(station_pos)
-            if dist < nearest_dist:
-                nearest_dist = dist
-                nearest_station = entity
+            stations_by_dist.append((entity, dist))
 
-        if nearest_station and nearest_dist > 0.05:  # If not already near a station
-            station_pos = entity_manager.get_component(nearest_station, Position)
-            if station_pos:
-                state.target_entity_id = nearest_station.id
-                entity_manager.add_component(ship_entity, NavigationTarget(
-                    target_x=station_pos.x,
-                    target_y=station_pos.y,
-                    max_speed=ship.max_speed,
-                    acceleration=ship.acceleration,
-                ))
+        if not stations_by_dist:
+            return
+
+        # Sort by distance
+        stations_by_dist.sort(key=lambda x: x[1])
+
+        # If we're near a station, pick a random nearby station to patrol to
+        # This creates constant movement between stations
+        if stations_by_dist[0][1] < 0.1:
+            # We're near a station - pick another one to visit
+            # Prefer closer stations but occasionally pick farther ones
+            nearby = [s for s in stations_by_dist if s[1] < 3.0]  # Within 3 AU
+            if len(nearby) > 1:
+                # Skip the closest one (we're already there), pick from rest
+                target_station = random.choice(nearby[1:min(5, len(nearby))])[0]
+            elif len(nearby) == 1 and len(stations_by_dist) > 1:
+                target_station = stations_by_dist[1][0]
+            else:
+                target_station = stations_by_dist[0][0]
+        else:
+            # Not near any station - head to the closest one
+            target_station = stations_by_dist[0][0]
+
+        station_pos = entity_manager.get_component(target_station, Position)
+        station_comp = entity_manager.get_component(target_station, Station)
+        if station_pos:
+            station_body = station_comp.parent_body if station_comp else ""
+            state.target_entity_id = target_station.id
+            entity_manager.add_component(ship_entity, NavigationTarget(
+                target_x=station_pos.x,
+                target_y=station_pos.y,
+                target_body_name=station_body,
+                max_speed=ship.max_speed,
+                acceleration=ship.acceleration,
+            ))
 
 
 def find_nearest_station(

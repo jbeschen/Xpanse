@@ -149,3 +149,32 @@ class ResourceDeposit:
     def is_depleted(self) -> bool:
         """Check if deposit is depleted."""
         return self.remaining <= 0
+
+
+@dataclass
+class ResourceKnowledge:
+    """Singleton component tracking which celestial bodies have been surveyed.
+
+    In the X-Drive era, only Earth-local bodies (Moon, Mars) have public resource data.
+    Other bodies must be probed/surveyed before their resources are known.
+    """
+    surveyed_bodies: set[str] = field(default_factory=set)
+    # Bodies with public data available from the start
+    PUBLIC_DATA_BODIES: tuple[str, ...] = ("Moon", "Mars", "Earth")
+
+    def is_known(self, body_name: str) -> bool:
+        """Check if a body's resources are known."""
+        return body_name in self.PUBLIC_DATA_BODIES or body_name in self.surveyed_bodies
+
+    def survey(self, body_name: str) -> bool:
+        """Mark a body as surveyed. Returns True if newly discovered."""
+        if body_name in self.PUBLIC_DATA_BODIES:
+            return False  # Already public
+        if body_name in self.surveyed_bodies:
+            return False  # Already surveyed
+        self.surveyed_bodies.add(body_name)
+        return True
+
+    def get_all_known(self) -> set[str]:
+        """Get all known body names."""
+        return set(self.PUBLIC_DATA_BODIES) | self.surveyed_bodies

@@ -144,8 +144,9 @@ class OrbitalSystem(System):
                 self._parent_positions[entity.name] = pos
 
         # Second pass: update orbits (for planets and other orbiting bodies)
-        # Convert dt from seconds to days (1 real second = 1 game minute = 1/1440 day)
-        dt_days = dt / 60.0  # dt is in game-minutes, convert to days
+        # Convert dt from seconds to days (1 real second = 1 game day)
+        # This makes 30-60 days to Jupiter = 30-60 seconds real time
+        dt_days = dt  # 1 second = 1 day (X-Drive era)
 
         for entity, orbit in entity_manager.get_all_components(Orbit):
             pos = entity_manager.get_component(entity, Position)
@@ -192,7 +193,7 @@ class MovementSystem(System):
     def update(self, dt: float, entity_manager: EntityManager) -> None:
         """Update positions based on velocity."""
         # Convert dt to days - same as OrbitalSystem for consistency
-        dt_days = dt / 60.0
+        dt_days = dt  # 1 second = 1 day (X-Drive era)
 
         for entity, vel in entity_manager.get_all_components(Velocity):
             # Skip if entity has an orbit (handled by OrbitalSystem)
@@ -213,13 +214,20 @@ class MovementSystem(System):
 
 @dataclass
 class NavigationTarget(Component):
-    """Component for entities moving towards a target with acceleration."""
+    """Component for entities moving towards a target with acceleration.
+
+    Supports tracking a moving celestial body with predictive targeting.
+    """
     target_x: float = 0.0
     target_y: float = 0.0
-    max_speed: float = 2.0  # AU per day (cruise speed)
+    max_speed: float = 0.10  # AU per day (cruise speed) - X-Drive era
     current_speed: float = 0.0  # Current speed (for acceleration)
-    acceleration: float = 0.5  # AU per day per day (how fast we speed up)
-    arrival_threshold: float = 0.02  # AU
+    acceleration: float = 0.03  # AU per day per day (how fast we speed up)
+    arrival_threshold: float = 0.05  # AU - larger threshold for orbit capture
+
+    # Target body tracking - if set, coordinates are updated each frame
+    target_body_name: str = ""  # Name of celestial body to track
+    orbit_capture_distance: float = 0.1  # AU - distance at which we lock to orbit
 
     def has_arrived(self, current_pos: Position) -> bool:
         """Check if close enough to target."""
@@ -227,6 +235,13 @@ class NavigationTarget(Component):
         dy = self.target_y - current_pos.y
         dist = math.sqrt(dx * dx + dy * dy)
         return dist <= self.arrival_threshold
+
+    def should_capture_orbit(self, current_pos: Position) -> bool:
+        """Check if close enough to capture into orbit around target body."""
+        dx = self.target_x - current_pos.x
+        dy = self.target_y - current_pos.y
+        dist = math.sqrt(dx * dx + dy * dy)
+        return dist <= self.orbit_capture_distance
 
     def get_stopping_distance(self) -> float:
         """Calculate distance needed to decelerate to stop."""
@@ -237,22 +252,25 @@ class NavigationTarget(Component):
 
 
 class NavigationSystem(System):
-    """System that moves entities towards their navigation targets with acceleration."""
+    """System that moves entities towards their navigation targets with predictive tracking."""
 
     priority = 3  # Run between orbital and movement systems
 
     def __init__(self) -> None:
-        # Cache of body positions for locking ships to planets
+        # Cache of body positions and orbits for predictive targeting
         self._body_positions: dict[str, Position] = {}
+        self._body_orbits: dict[str, Orbit] = {}
 
     def update(self, dt: float, entity_manager: EntityManager) -> None:
-        """Update velocities to move towards targets with acceleration/deceleration."""
-        dt_days = dt / 60.0  # Same conversion as other systems
+        """Update velocities to move towards targets with predictive tracking."""
+        dt_days = dt  # 1 second = 1 day (X-Drive era)
 
-        # Cache celestial body positions for ship locking
+        # Cache celestial body positions and orbits
         self._update_body_cache(entity_manager)
 
-        for entity, nav in entity_manager.get_all_components(NavigationTarget):
+        # Collect into list first to avoid modifying dict during iteration
+        nav_entities = list(entity_manager.get_all_components(NavigationTarget))
+        for entity, nav in nav_entities:
             pos = entity_manager.get_component(entity, Position)
             vel = entity_manager.get_component(entity, Velocity)
 
@@ -263,25 +281,41 @@ class NavigationSystem(System):
             if entity_manager.has_component(entity, ParentBody):
                 entity_manager.remove_component(entity, ParentBody)
 
+            # Update target position if tracking a body
+            if nav.target_body_name:
+                self._update_target_for_body(nav, pos, entity_manager)
+
             # Calculate direction and distance to target
             dx = nav.target_x - pos.x
             dy = nav.target_y - pos.y
             dist = math.sqrt(dx * dx + dy * dy)
 
-            # Check if arrived (use a slightly larger threshold for fast-moving ships)
-            if nav.has_arrived(pos) or dist <= 0.001:
-                # Snap to target position to prevent drift
+            # Check for orbit capture - if close enough to target body, lock to it
+            if nav.target_body_name and nav.should_capture_orbit(pos):
+                # Lock to target body
+                self._lock_to_body(entity, pos, nav.target_body_name, entity_manager)
+                vel.vx = 0.0
+                vel.vy = 0.0
+                nav.current_speed = 0.0
+                # Remove navigation target - we've arrived
+                entity_manager.remove_component(entity, NavigationTarget)
+                continue
+
+            # Check if arrived at fixed coordinate (no body tracking)
+            # Note: We don't remove NavigationTarget here - ShipAI will do that
+            # after processing the arrival (advancing trade states, etc.)
+            if not nav.target_body_name and (nav.has_arrived(pos) or dist <= 0.001):
                 pos.x = nav.target_x
                 pos.y = nav.target_y
                 vel.vx = 0.0
                 vel.vy = 0.0
                 nav.current_speed = 0.0
-
-                # Lock ship to nearest celestial body so it moves with the planet
                 self._lock_to_nearest_body(entity, pos, entity_manager)
                 continue
 
             # Normalize direction
+            if dist < 0.001:
+                continue  # Too close to determine direction
             dir_x = dx / dist
             dir_y = dy / dist
 
@@ -289,41 +323,122 @@ class NavigationSystem(System):
             stopping_dist = nav.get_stopping_distance()
 
             # Determine if we should accelerate or decelerate
-            if dist <= stopping_dist + nav.arrival_threshold:
-                # Decelerate - we're close enough to start slowing down
-                nav.current_speed = max(0.1, nav.current_speed - nav.acceleration * dt_days)
+            if dist <= stopping_dist + nav.orbit_capture_distance:
+                # Decelerate - approaching capture zone
+                nav.current_speed = max(0.01, nav.current_speed - nav.acceleration * dt_days)
             elif nav.current_speed < nav.max_speed:
                 # Accelerate towards max speed
                 nav.current_speed = min(nav.max_speed, nav.current_speed + nav.acceleration * dt_days)
 
-            # Calculate how far we would move this frame
-            frame_distance = nav.current_speed * dt_days
+            # Set velocity - MovementSystem will apply it
+            vel.vx = dir_x * nav.current_speed
+            vel.vy = dir_y * nav.current_speed
 
-            # If we would overshoot, clamp to the remaining distance
-            if frame_distance >= dist:
-                # Move directly to target
-                pos.x = nav.target_x
-                pos.y = nav.target_y
-                vel.vx = 0.0
-                vel.vy = 0.0
-                nav.current_speed = 0.0
+    def _update_target_for_body(
+        self,
+        nav: NavigationTarget,
+        ship_pos: Position,
+        entity_manager: EntityManager
+    ) -> None:
+        """Update navigation target to intercept a moving body."""
+        body_name = nav.target_body_name
 
-                # Lock ship to nearest celestial body
-                self._lock_to_nearest_body(entity, pos, entity_manager)
-            else:
-                # Set velocity - MovementSystem will apply it
-                vel.vx = dir_x * nav.current_speed
-                vel.vy = dir_y * nav.current_speed
+        # Get current body position
+        body_pos = self._body_positions.get(body_name)
+        body_orbit = self._body_orbits.get(body_name)
+
+        if not body_pos:
+            return  # Body not found
+
+        if not body_orbit:
+            # Body doesn't orbit (Sun, or moons with ParentBody) - just track current position
+            nav.target_x = body_pos.x
+            nav.target_y = body_pos.y
+            return
+
+        # Calculate distance and estimated travel time
+        dx = body_pos.x - ship_pos.x
+        dy = body_pos.y - ship_pos.y
+        dist = math.sqrt(dx * dx + dy * dy)
+
+        if dist < 0.01:
+            # Already at target
+            nav.target_x = body_pos.x
+            nav.target_y = body_pos.y
+            return
+
+        # Estimate travel time based on current and max speed
+        avg_speed = (nav.current_speed + nav.max_speed) / 2 if nav.current_speed > 0 else nav.max_speed
+        if avg_speed < 0.01:
+            avg_speed = nav.max_speed
+
+        estimated_days = dist / avg_speed
+
+        # Calculate where the body will be when we arrive
+        angular_vel = body_orbit.angular_velocity()
+        if body_orbit.clockwise:
+            angular_vel = -angular_vel
+
+        future_angle = body_orbit.current_angle + (angular_vel * estimated_days)
+        future_x, future_y = body_orbit.get_position_at_angle(future_angle)
+
+        # Add parent position if body has a parent
+        parent_pos = self._body_positions.get(body_orbit.parent_name)
+        if parent_pos:
+            future_x += parent_pos.x
+            future_y += parent_pos.y
+
+        nav.target_x = future_x
+        nav.target_y = future_y
 
     def _update_body_cache(self, entity_manager: EntityManager) -> None:
-        """Cache celestial body positions for ship locking."""
+        """Cache celestial body positions and orbits for predictive targeting."""
         from ..entities.celestial import CelestialBody
 
         self._body_positions.clear()
+        self._body_orbits.clear()
+
         for entity, body in entity_manager.get_all_components(CelestialBody):
             pos = entity_manager.get_component(entity, Position)
+            orbit = entity_manager.get_component(entity, Orbit)
             if pos and entity.name:
                 self._body_positions[entity.name] = pos
+            if orbit and entity.name:
+                self._body_orbits[entity.name] = orbit
+
+    def _lock_to_body(
+        self,
+        entity,
+        pos: Position,
+        body_name: str,
+        entity_manager: EntityManager
+    ) -> None:
+        """Lock a ship to a specific celestial body."""
+        body_pos = self._body_positions.get(body_name)
+        if not body_pos:
+            return
+
+        # Calculate offset from body center
+        offset_x = pos.x - body_pos.x
+        offset_y = pos.y - body_pos.y
+
+        # Clamp offset to reasonable orbit distance
+        offset_dist = math.sqrt(offset_x * offset_x + offset_y * offset_y)
+        if offset_dist > 0.1:
+            # Normalize and set to standard orbit distance
+            offset_x = (offset_x / offset_dist) * 0.05
+            offset_y = (offset_y / offset_dist) * 0.05
+
+        # Snap position to orbit
+        pos.x = body_pos.x + offset_x
+        pos.y = body_pos.y + offset_y
+
+        # Add ParentBody component
+        entity_manager.add_component(entity, ParentBody(
+            parent_name=body_name,
+            offset_x=offset_x,
+            offset_y=offset_y
+        ))
 
     def _lock_to_nearest_body(
         self,

@@ -1,5 +1,7 @@
 """Celestial body entities (planets, moons, asteroids)."""
 from __future__ import annotations
+import math
+import random
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -53,10 +55,8 @@ def create_celestial_body(
         is_colonizable=data.body_type in (BodyType.PLANET, BodyType.MOON, BodyType.DWARF_PLANET),
     ))
 
-    # Add position (will be updated by orbital system)
-    em.add_component(entity, Position(x=data.semi_major_axis, y=0.0))
-
     # Add orbit or parent body relationship
+    # For orbiting bodies, randomize starting position around orbit
     if data.parent:
         if data.body_type == BodyType.MOON:
             # Moons stay at fixed offset from parent (no orbiting)
@@ -73,6 +73,9 @@ def create_celestial_body(
             offset_x = 0.05 + (moon_index * 0.03)  # Spread horizontally
             offset_y = 0.02 + (moon_index * 0.03)  # Spread vertically
 
+            # Add position (will be updated by OrbitalSystem to follow parent)
+            em.add_component(entity, Position(x=0.0, y=0.0))
+
             em.add_component(entity, ParentBody(
                 parent_name=data.parent,
                 offset_x=offset_x,
@@ -80,11 +83,23 @@ def create_celestial_body(
             ))
         else:
             # Planets and other bodies orbit
+            # Randomize starting angle to spread planets around orbits
+            starting_angle = random.uniform(0, 2 * math.pi)
+
+            # Set initial position to match starting angle
+            initial_x = data.semi_major_axis * math.cos(starting_angle)
+            initial_y = data.semi_major_axis * math.sin(starting_angle)
+            em.add_component(entity, Position(x=initial_x, y=initial_y))
+
             em.add_component(entity, Orbit(
                 parent_name=data.parent,
                 semi_major_axis=data.semi_major_axis,
                 orbital_period=data.orbital_period,
+                current_angle=starting_angle,
             ))
+    else:
+        # No parent - this is the Sun or a rogue body
+        em.add_component(entity, Position(x=0.0, y=0.0))
 
     # Add resource deposits
     for resource_type, richness in data.resources:

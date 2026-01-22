@@ -29,6 +29,8 @@ class MenuId(Enum):
     HELP = auto()
     WAYPOINT_MODE = auto()  # Not a menu but a modal mode
     NEWS_FEED = auto()  # News, events, and contracts panel
+    STORY_EVENT = auto()  # Campaign story events that pause the game
+    SHIPS_LIST = auto()  # Fleet panel showing all player ships
 
 
 class MenuManager:
@@ -2151,3 +2153,434 @@ class NewsFeedPanel:
             current_y += 8
 
         self.max_scroll = max(0, len(discoveries) - 3)
+
+
+class StoryEventPanel:
+    """Modal panel for campaign story events that pause the game.
+
+    Displays major narrative moments, mission briefings, and rewards.
+    The game is paused while this panel is visible.
+    """
+
+    def __init__(self, screen_width: int, screen_height: int) -> None:
+        # Center the panel on screen
+        self.width = min(700, screen_width - 100)
+        self.height = min(500, screen_height - 100)
+        self.x = (screen_width - self.width) // 2
+        self.y = (screen_height - self.height) // 2
+
+        self.visible = False
+        self.current_event = None  # StoryEvent being displayed
+
+        # Styling
+        self.bg_color = (15, 20, 30, 245)
+        self.border_color = (100, 140, 200)
+        self.title_color = (255, 220, 100)
+        self.body_color = (200, 200, 210)
+        self.objective_color = (100, 200, 150)
+
+    def show(self, event) -> None:
+        """Show a story event."""
+        self.current_event = event
+        self.visible = True
+
+    def hide(self) -> None:
+        """Hide the panel."""
+        self.visible = False
+        self.current_event = None
+
+    def handle_key(self, key: int) -> str | None:
+        """Handle keyboard input. Returns action if any."""
+        if key in (pygame.K_RETURN, pygame.K_SPACE, pygame.K_ESCAPE):
+            return "acknowledge"
+        return None
+
+    def render(self, surface: pygame.Surface) -> None:
+        """Render the story event panel."""
+        if not self.visible or not self.current_event:
+            return
+
+        event = self.current_event
+
+        # Semi-transparent overlay for the entire screen
+        overlay = pygame.Surface(surface.get_size(), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 180))
+        surface.blit(overlay, (0, 0))
+
+        # Panel background
+        panel_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        panel_surf.fill(self.bg_color)
+        surface.blit(panel_surf, (self.x, self.y))
+
+        # Decorative border
+        pygame.draw.rect(surface, self.border_color, (self.x, self.y, self.width, self.height), 3)
+
+        # Inner border glow effect
+        pygame.draw.rect(
+            surface,
+            (self.border_color[0] // 2, self.border_color[1] // 2, self.border_color[2] // 2),
+            (self.x + 5, self.y + 5, self.width - 10, self.height - 10),
+            1
+        )
+
+        # Load fonts
+        try:
+            title_font = pygame.font.SysFont("Arial", 28, bold=True)
+            body_font = pygame.font.SysFont("Arial", 16)
+            objective_font = pygame.font.SysFont("Arial", 14)
+            hint_font = pygame.font.SysFont("Arial", 12)
+        except Exception:
+            title_font = pygame.font.Font(None, 32)
+            body_font = pygame.font.Font(None, 20)
+            objective_font = pygame.font.Font(None, 18)
+            hint_font = pygame.font.Font(None, 16)
+
+        current_y = self.y + 25
+
+        # Title with decorative lines
+        title_surf = title_font.render(event.title, True, self.title_color)
+        title_x = self.x + (self.width - title_surf.get_width()) // 2
+        surface.blit(title_surf, (title_x, current_y))
+
+        # Decorative lines beside title
+        line_y = current_y + title_surf.get_height() // 2
+        pygame.draw.line(
+            surface, self.border_color,
+            (self.x + 20, line_y),
+            (title_x - 15, line_y), 2
+        )
+        pygame.draw.line(
+            surface, self.border_color,
+            (title_x + title_surf.get_width() + 15, line_y),
+            (self.x + self.width - 20, line_y), 2
+        )
+
+        current_y += title_surf.get_height() + 25
+
+        # Body text with word wrapping
+        body_lines = self._wrap_text(event.body, body_font, self.width - 60)
+        for line in body_lines:
+            if current_y > self.y + self.height - 120:
+                # Don't overflow into objectives area
+                break
+            line_surf = body_font.render(line, True, self.body_color)
+            surface.blit(line_surf, (self.x + 30, current_y))
+            current_y += body_font.get_height() + 4
+
+        # Objectives section (if any)
+        if event.objectives:
+            current_y = self.y + self.height - 100
+
+            # Objectives header
+            obj_header = objective_font.render("OBJECTIVES:", True, (150, 180, 220))
+            surface.blit(obj_header, (self.x + 30, current_y))
+            current_y += 22
+
+            for objective in event.objectives[:3]:  # Max 3 objectives shown
+                # Bullet point
+                pygame.draw.circle(surface, self.objective_color, (self.x + 40, current_y + 6), 3)
+                obj_surf = objective_font.render(objective, True, self.objective_color)
+                surface.blit(obj_surf, (self.x + 50, current_y))
+                current_y += 20
+
+        # Continue hint at bottom
+        hint_text = "Press ENTER or SPACE to continue..."
+        hint_surf = hint_font.render(hint_text, True, (120, 120, 140))
+        hint_x = self.x + (self.width - hint_surf.get_width()) // 2
+        surface.blit(hint_surf, (hint_x, self.y + self.height - 25))
+
+        # Pulsing effect on hint (simple alpha variation based on time would need clock)
+        # For now, just a static hint is fine
+
+    def _wrap_text(self, text: str, font: pygame.font.Font, max_width: int) -> list[str]:
+        """Wrap text to fit within a given width."""
+        lines = []
+        paragraphs = text.split('\n')
+
+        for paragraph in paragraphs:
+            if not paragraph.strip():
+                lines.append("")  # Preserve empty lines for spacing
+                continue
+
+            words = paragraph.split()
+            current_line = ""
+
+            for word in words:
+                test_line = current_line + (" " if current_line else "") + word
+                test_width = font.size(test_line)[0]
+
+                if test_width <= max_width:
+                    current_line = test_line
+                else:
+                    if current_line:
+                        lines.append(current_line)
+                    current_line = word
+
+            if current_line:
+                lines.append(current_line)
+
+        return lines
+
+
+class ShipsListPanel:
+    """Fleet panel showing all player ships with their status."""
+
+    def __init__(self, x: int, y: int, width: int = 350, height: int = 400) -> None:
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.visible = False
+        self.bg_color = (20, 25, 35, 240)
+        self.border_color = (80, 100, 140)
+
+        # Ship list
+        self.ships: list[dict] = []  # List of ship info dicts
+        self.selected_index: int = -1
+        self.scroll_offset: int = 0
+
+        # Player faction ID
+        self.player_faction_id: UUID | None = None
+
+    def set_player_faction(self, faction_id: UUID | None) -> None:
+        """Set the player faction ID for filtering ships."""
+        self.player_faction_id = faction_id
+
+    def select_ship(self, index: int) -> UUID | None:
+        """Select a ship by index.
+
+        Args:
+            index: 0-based index in visible list (use 1-9 for keys)
+
+        Returns:
+            Ship ID if valid selection, None otherwise
+        """
+        adjusted_index = self.scroll_offset + index
+        if 0 <= adjusted_index < len(self.ships):
+            self.selected_index = adjusted_index
+            return self.ships[adjusted_index]['id']
+        return None
+
+    def get_selected_ship_id(self) -> UUID | None:
+        """Get the currently selected ship's ID."""
+        if 0 <= self.selected_index < len(self.ships):
+            return self.ships[self.selected_index]['id']
+        return None
+
+    def scroll_up(self) -> None:
+        """Scroll the ship list up."""
+        self.scroll_offset = max(0, self.scroll_offset - 1)
+
+    def scroll_down(self) -> None:
+        """Scroll the ship list down."""
+        max_scroll = max(0, len(self.ships) - 9)  # Show 9 ships at a time
+        self.scroll_offset = min(max_scroll, self.scroll_offset + 1)
+
+    def update_ships(self, world: "World") -> None:
+        """Update the ships list from the world."""
+        from ..entities.ships import Ship
+        from ..entities.stations import Station
+        from ..solar_system.orbits import Position, NavigationTarget, ParentBody
+        from ..simulation.trade import Trader, TradeState, ManualRoute
+
+        if not self.player_faction_id:
+            self.ships = []
+            return
+
+        em = world.entity_manager
+        self.ships = []
+
+        for entity, ship in em.get_all_components(Ship):
+            if ship.owner_faction_id != self.player_faction_id:
+                continue
+
+            pos = em.get_component(entity, Position)
+            nav = em.get_component(entity, NavigationTarget)
+            trader = em.get_component(entity, Trader)
+            manual_route = em.get_component(entity, ManualRoute)
+            parent = em.get_component(entity, ParentBody)
+
+            # Determine status
+            status = "Idle"
+            location = "Unknown"
+            destination = None
+
+            if pos:
+                # Find current location (nearest body/station)
+                if parent:
+                    location = parent.parent_name
+                else:
+                    # Check for nearby stations
+                    for station_entity, station in em.get_all_components(Station):
+                        station_pos = em.get_component(station_entity, Position)
+                        if station_pos:
+                            dist = ((pos.x - station_pos.x)**2 + (pos.y - station_pos.y)**2)**0.5
+                            if dist < 0.1:
+                                location = station_entity.name
+                                break
+
+            if nav and (nav.target_x != 0 or nav.target_y != 0):
+                # Ship is traveling
+                if nav.current_speed > 0.01:
+                    status = "Traveling"
+                    # Find destination name
+                    for station_entity, _ in em.get_all_components(Station):
+                        station_pos = em.get_component(station_entity, Position)
+                        if station_pos:
+                            dist = ((nav.target_x - station_pos.x)**2 + (nav.target_y - station_pos.y)**2)**0.5
+                            if dist < 0.1:
+                                destination = station_entity.name
+                                break
+                    if not destination and nav.target_body_name:
+                        destination = nav.target_body_name
+
+            if manual_route and manual_route.waypoints:
+                status = "Trading (Route)"
+            elif trader:
+                if trader.state == TradeState.TRAVELING_TO_BUY:
+                    status = "Trading (Buy)"
+                elif trader.state == TradeState.TRAVELING_TO_SELL:
+                    status = "Trading (Sell)"
+                elif trader.state == TradeState.BUYING:
+                    status = "Buying"
+                elif trader.state == TradeState.SELLING:
+                    status = "Selling"
+
+            ship_info = {
+                'id': entity.id,
+                'name': entity.name,
+                'type': ship.ship_type.value,
+                'status': status,
+                'location': location,
+                'destination': destination,
+            }
+            self.ships.append(ship_info)
+
+        # Sort by name
+        self.ships.sort(key=lambda s: s['name'])
+
+        # Clamp selection
+        if self.selected_index >= len(self.ships):
+            self.selected_index = len(self.ships) - 1 if self.ships else -1
+
+    def render(self, surface: pygame.Surface, font: pygame.font.Font) -> None:
+        """Render the ships list panel."""
+        if not self.visible:
+            return
+
+        # Background with transparency
+        panel_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        panel_surf.fill(self.bg_color)
+        surface.blit(panel_surf, (self.x, self.y))
+
+        # Border
+        pygame.draw.rect(surface, self.border_color, (self.x, self.y, self.width, self.height), 2)
+
+        # Title
+        title_font = pygame.font.Font(None, 24)
+        title = title_font.render("FLEET [F]", True, (200, 220, 255))
+        surface.blit(title, (self.x + 10, self.y + 8))
+
+        # Ship count
+        count_text = f"{len(self.ships)} ships"
+        count_surf = font.render(count_text, True, (150, 150, 150))
+        surface.blit(count_surf, (self.x + self.width - count_surf.get_width() - 15, self.y + 12))
+
+        # Separator
+        pygame.draw.line(surface, self.border_color, (self.x + 5, self.y + 35), (self.x + self.width - 5, self.y + 35), 1)
+
+        current_y = self.y + 42
+        line_height = 22
+
+        if not self.ships:
+            no_ships = font.render("No ships in fleet", True, (100, 100, 100))
+            surface.blit(no_ships, (self.x + 20, current_y + 20))
+            return
+
+        # Column headers
+        header_color = (120, 140, 180)
+        headers = ["#", "Name", "Status", "Location"]
+        col_widths = [25, 130, 90, 90]
+        col_x = self.x + 10
+        for header, width in zip(headers, col_widths):
+            header_surf = font.render(header, True, header_color)
+            surface.blit(header_surf, (col_x, current_y))
+            col_x += width
+        current_y += line_height
+
+        # Separator after headers
+        pygame.draw.line(surface, (50, 60, 80), (self.x + 5, current_y - 4), (self.x + self.width - 5, current_y - 4), 1)
+
+        # Ship list (show 9 at a time for 1-9 keys)
+        visible_ships = self.ships[self.scroll_offset:self.scroll_offset + 9]
+
+        for i, ship in enumerate(visible_ships):
+            actual_index = self.scroll_offset + i
+            is_selected = actual_index == self.selected_index
+
+            # Selection highlight
+            if is_selected:
+                pygame.draw.rect(
+                    surface, (50, 60, 90),
+                    (self.x + 5, current_y - 2, self.width - 10, line_height)
+                )
+
+            # Determine colors based on status
+            if ship['status'] == 'Idle':
+                status_color = (150, 150, 150)
+            elif 'Trading' in ship['status']:
+                status_color = (100, 200, 100)
+            elif ship['status'] == 'Traveling':
+                status_color = (100, 150, 255)
+            else:
+                status_color = (200, 200, 100)
+
+            text_color = (255, 255, 255) if is_selected else (200, 200, 200)
+
+            # Number key
+            col_x = self.x + 10
+            num_surf = font.render(f"{i + 1}", True, (150, 150, 200))
+            surface.blit(num_surf, (col_x, current_y))
+            col_x += col_widths[0]
+
+            # Ship name (truncated)
+            name = ship['name'][:16]
+            name_surf = font.render(name, True, text_color)
+            surface.blit(name_surf, (col_x, current_y))
+            col_x += col_widths[1]
+
+            # Status
+            status_surf = font.render(ship['status'][:12], True, status_color)
+            surface.blit(status_surf, (col_x, current_y))
+            col_x += col_widths[2]
+
+            # Location
+            loc = ship['location'][:12] if ship['location'] else "-"
+            loc_surf = font.render(loc, True, (150, 150, 150))
+            surface.blit(loc_surf, (col_x, current_y))
+
+            current_y += line_height
+
+        # Scroll indicators
+        if self.scroll_offset > 0:
+            up_arrow = font.render("▲ More above", True, (100, 100, 100))
+            surface.blit(up_arrow, (self.x + self.width // 2 - 40, self.y + 40))
+
+        if self.scroll_offset + 9 < len(self.ships):
+            down_arrow = font.render("▼ More below", True, (100, 100, 100))
+            surface.blit(down_arrow, (self.x + self.width // 2 - 40, self.y + self.height - 60))
+
+        # Controls footer
+        footer_y = self.y + self.height - 45
+        pygame.draw.line(surface, self.border_color, (self.x + 5, footer_y - 5), (self.x + self.width - 5, footer_y - 5), 1)
+
+        controls = [
+            "1-9: Select ship",
+            "Enter: Follow ship",
+            "W: Set waypoint",
+        ]
+        ctrl_y = footer_y
+        for ctrl in controls:
+            ctrl_surf = font.render(ctrl, True, (120, 120, 140))
+            surface.blit(ctrl_surf, (self.x + 10, ctrl_y))
+            ctrl_y += 14
