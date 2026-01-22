@@ -43,6 +43,21 @@ class Ship(Component):
     local_system: str = ""  # Planet name this drone is restricted to
 
 
+@dataclass
+class ShipState(Component):
+    """Component for ship AI state (used by ShipAISystemV2).
+
+    Stores the current behavior and state for the ship's AI.
+    This is separate from Ship to allow the AI system to manage
+    state independently.
+    """
+    behavior_name: str = "patrol"  # Current behavior strategy name
+    sub_state: str = "idle"  # Behavior-specific sub-state
+    state_data: dict = field(default_factory=dict)  # Behavior-specific data
+    wait_time: float = 0.0  # Time remaining before next AI update
+    target_entity_id: UUID | None = None  # Current navigation target
+
+
 # Ship type configurations
 # X-Drive Era: Speeds in AU per day - 1 second = 1 day
 # Earth to Jupiter (~4.2 AU) should take 30-60 seconds for freighters

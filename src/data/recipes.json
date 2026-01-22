@@ -3,6 +3,7 @@
     "refine_metal": {
       "name": "Refine Metal",
       "category": "refinery",
+      "station_types": ["refinery", "factory"],
       "duration": 10.0,
       "inputs": {
         "iron_ore": 2.0
@@ -14,6 +15,7 @@
     "process_silicon": {
       "name": "Process Silicon",
       "category": "refinery",
+      "station_types": ["refinery", "factory"],
       "duration": 10.0,
       "inputs": {
         "silicates": 2.0
@@ -25,6 +27,7 @@
     "purify_water": {
       "name": "Purify Water",
       "category": "refinery",
+      "station_types": ["refinery", "colony"],
       "duration": 5.0,
       "inputs": {
         "water_ice": 1.5
@@ -36,6 +39,7 @@
     "produce_fuel": {
       "name": "Produce Fuel",
       "category": "refinery",
+      "station_types": ["refinery"],
       "duration": 15.0,
       "inputs": {
         "water": 1.0,
@@ -48,6 +52,7 @@
     "manufacture_electronics": {
       "name": "Manufacture Electronics",
       "category": "factory",
+      "station_types": ["factory"],
       "duration": 20.0,
       "inputs": {
         "silicon": 2.0,
@@ -60,6 +65,7 @@
     "manufacture_machinery": {
       "name": "Manufacture Machinery",
       "category": "factory",
+      "station_types": ["factory"],
       "duration": 25.0,
       "inputs": {
         "refined_metal": 3.0,
@@ -72,6 +78,7 @@
     "manufacture_life_support": {
       "name": "Manufacture Life Support",
       "category": "factory",
+      "station_types": ["factory", "colony"],
       "duration": 20.0,
       "inputs": {
         "water": 2.0,
@@ -84,6 +91,7 @@
     "build_habitat_module": {
       "name": "Build Habitat Module",
       "category": "advanced_factory",
+      "station_types": ["factory", "shipyard"],
       "duration": 60.0,
       "inputs": {
         "refined_metal": 5.0,
@@ -97,6 +105,7 @@
     "build_ship_components": {
       "name": "Build Ship Components",
       "category": "shipyard",
+      "station_types": ["shipyard"],
       "duration": 45.0,
       "inputs": {
         "refined_metal": 4.0,
@@ -110,6 +119,7 @@
     "research_advanced_tech": {
       "name": "Research Advanced Tech",
       "category": "research",
+      "station_types": ["outpost", "colony"],
       "duration": 90.0,
       "inputs": {
         "electronics": 3.0,
@@ -119,5 +129,14 @@
         "advanced_tech": 1.0
       }
     }
+  },
+  "station_type_categories": {
+    "refinery": ["refinery"],
+    "factory": ["factory", "advanced_factory"],
+    "shipyard": ["shipyard"],
+    "colony": ["factory"],
+    "trade_hub": [],
+    "outpost": ["research"],
+    "mining_station": []
   }
 }

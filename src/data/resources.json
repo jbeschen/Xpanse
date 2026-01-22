@@ -4,6 +4,7 @@
       "name": "Water Ice",
       "tier": 0,
       "base_price": 10,
+      "category": "raw",
       "description": "Frozen water extracted from celestial bodies",
       "unit": "tons"
     },
@@ -11,6 +12,7 @@
       "name": "Iron Ore",
       "tier": 0,
       "base_price": 15,
+      "category": "raw",
       "description": "Raw iron-rich minerals",
       "unit": "tons"
     },
@@ -18,6 +20,7 @@
       "name": "Silicates",
       "tier": 0,
       "base_price": 8,
+      "category": "raw",
       "description": "Silicon-based minerals",
       "unit": "tons"
     },
@@ -25,6 +28,7 @@
       "name": "Rare Earths",
       "tier": 0,
       "base_price": 50,
+      "category": "raw",
       "description": "Rare earth elements essential for electronics",
       "unit": "kg"
     },
@@ -32,6 +36,7 @@
       "name": "Helium-3",
       "tier": 0,
       "base_price": 100,
+      "category": "raw",
       "description": "Fusion fuel isotope",
       "unit": "kg"
     },
@@ -39,6 +44,7 @@
       "name": "Refined Metal",
       "tier": 1,
       "base_price": 40,
+      "category": "basic",
       "description": "Processed metal alloys",
       "unit": "tons"
     },
@@ -46,6 +52,7 @@
       "name": "Silicon",
       "tier": 1,
       "base_price": 35,
+      "category": "basic",
       "description": "Pure silicon for electronics",
       "unit": "tons"
     },
@@ -53,6 +60,7 @@
       "name": "Water",
       "tier": 1,
       "base_price": 25,
+      "category": "basic",
       "description": "Purified water for life support",
       "unit": "tons"
     },
@@ -60,6 +68,7 @@
       "name": "Fuel",
       "tier": 1,
       "base_price": 60,
+      "category": "basic",
       "description": "Propellant for spacecraft",
       "unit": "tons"
     },
@@ -67,6 +76,7 @@
       "name": "Electronics",
       "tier": 2,
       "base_price": 150,
+      "category": "advanced",
       "description": "Electronic components and circuits",
       "unit": "units"
     },
@@ -74,6 +84,7 @@
       "name": "Machinery",
       "tier": 2,
       "base_price": 200,
+      "category": "advanced",
       "description": "Mechanical equipment and parts",
       "unit": "units"
     },
@@ -81,6 +92,7 @@
       "name": "Life Support Units",
       "tier": 2,
       "base_price": 180,
+      "category": "advanced",
       "description": "Environmental systems for habitats",
       "unit": "units"
     },
@@ -88,6 +100,7 @@
       "name": "Habitat Modules",
       "tier": 3,
       "base_price": 500,
+      "category": "complex",
       "description": "Pre-fabricated living quarters",
       "unit": "modules"
     },
@@ -95,6 +108,7 @@
       "name": "Ship Components",
       "tier": 3,
       "base_price": 800,
+      "category": "complex",
       "description": "Spacecraft parts and assemblies",
       "unit": "units"
     },
@@ -102,8 +116,37 @@
       "name": "Advanced Tech",
       "tier": 3,
       "base_price": 1000,
+      "category": "complex",
       "description": "Cutting-edge technology",
       "unit": "units"
     }
+  },
+  "categories": {
+    "raw": {
+      "name": "Raw Materials",
+      "description": "Unprocessed resources extracted from celestial bodies",
+      "tier_range": [0, 0]
+    },
+    "basic": {
+      "name": "Basic Materials",
+      "description": "First-stage processed materials",
+      "tier_range": [1, 1]
+    },
+    "advanced": {
+      "name": "Advanced Components",
+      "description": "Second-stage manufactured goods",
+      "tier_range": [2, 2]
+    },
+    "complex": {
+      "name": "Complex Products",
+      "description": "High-tier manufactured products",
+      "tier_range": [3, 3]
+    }
+  },
+  "tiers": {
+    "0": {"name": "Raw", "color": [139, 90, 43]},
+    "1": {"name": "Basic", "color": [100, 149, 237]},
+    "2": {"name": "Advanced", "color": [148, 103, 189]},
+    "3": {"name": "Complex", "color": [255, 215, 0]}
   }
 }

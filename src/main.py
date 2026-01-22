@@ -7,6 +7,8 @@ import math
 from .config import SCREEN_WIDTH, SCREEN_HEIGHT, FPS, TITLE, COLORS, TOOLBAR_HEIGHT
 from .core.world import World
 from .core.events import EventBus
+from .core.transactions import get_transaction_service
+from .core.registries import get_resource_registry, get_recipe_registry
 from .solar_system.orbits import OrbitalSystem, MovementSystem, NavigationSystem
 from .simulation.production import ProductionSystem, ExtractionSystem
 from .simulation.economy import EconomySystem, PopulationSystem
@@ -16,10 +18,12 @@ from .simulation.goals import GoalSystem, EarthShipyardGoal, GoalStatus
 from .simulation.freelancer import FreelancerSpawner, FreelancerManager
 from .ai.faction_ai import FactionAI
 from .ai.ship_ai import ShipAI
+from .ai.trade_routes import TradeRouteFinder, SpatialIndex
 from .ui.camera import Camera
 from .ui.renderer import Renderer
 from .ui.input import InputHandler, InputAction
 from .systems.building import BuildingSystem
+from .systems.ship_ai_v2 import ShipAISystemV2
 from .systems.save_load import save_game, load_game
 
 
@@ -429,9 +433,23 @@ def main() -> None:
     world = World()
     event_bus = world.event_bus
 
+    # Initialize registries (loads JSON data)
+    resource_registry = get_resource_registry()
+    recipe_registry = get_recipe_registry()
+
+    # Initialize transaction service
+    transaction_service = get_transaction_service(event_bus)
+
+    # Create spatial index and trade route finder for efficient route discovery
+    spatial_index = SpatialIndex(cell_size=0.5)
+    route_finder = TradeRouteFinder(world.entity_manager, spatial_index)
+
     # Create systems
     building_system = BuildingSystem(event_bus)
     faction_ai = FactionAI(event_bus)
+
+    # Create V2 ship AI system with behaviors (optional - can run alongside or replace ShipAI)
+    ship_ai_v2 = ShipAISystemV2(event_bus, route_finder, transaction_service)
 
     # Add systems (order matters - priority determines update order)
     world.add_system(OrbitalSystem())
@@ -441,7 +459,8 @@ def main() -> None:
     world.add_system(ProductionSystem(event_bus))
     world.add_system(PopulationSystem(event_bus))
     world.add_system(DiscoverySystem(event_bus))
-    world.add_system(ShipAI(event_bus))
+    # world.add_system(ShipAI(event_bus))  # V1 ship AI (disabled)
+    world.add_system(ship_ai_v2)  # V2 ship AI with behavior strategies
     world.add_system(TradeSystem(event_bus))
     world.add_system(EconomySystem(event_bus))
     world.add_system(EventSystem(event_bus))
