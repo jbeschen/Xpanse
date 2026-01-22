@@ -8,7 +8,7 @@ from .core.world import World
 from .core.events import EventBus
 from .solar_system.orbits import OrbitalSystem, MovementSystem, NavigationSystem
 from .simulation.production import ProductionSystem, ExtractionSystem
-from .simulation.economy import EconomySystem
+from .simulation.economy import EconomySystem, PopulationSystem
 from .simulation.trade import TradeSystem
 from .ai.faction_ai import FactionAI
 from .ai.ship_ai import ShipAI
@@ -171,6 +171,7 @@ def create_competitive_start(world: World) -> dict:
     from .entities.celestial import create_solar_system
     from .entities.factions import create_faction, FactionType
     from .entities.ships import create_ship, ShipType
+    from .entities.stations import create_earth_market
 
     # Create solar system
     bodies = create_solar_system(world)
@@ -228,9 +229,49 @@ def create_competitive_start(world: World) -> dict:
                 is_trader=True,
             )
 
+    # Create Freelancers faction - independent traders
+    freelancers = create_faction(
+        world=world,
+        name="Freelancers",
+        faction_type=FactionType.INDEPENDENT,
+        color=(180, 180, 180),
+        credits=500000,
+        is_player=False,
+    )
+    freelancer_id = freelancers.id
+
+    # Create Earth market - the main consumer hub
+    # Earth position is approximately (1, 0) AU
+    earth_market = create_earth_market(
+        world=world,
+        position=(1.0, 0.0),
+        owner_faction_id=None,  # Earth market is neutral/public
+    )
+
+    # Create Freelancer trading ships - they seek profitable trades
+    freelancer_positions = [
+        (1.05, 0.05),   # Near Earth
+        (0.95, -0.05),  # Near Earth
+        (1.55, 0.1),    # Near Mars orbit
+        (1.45, -0.1),   # Near Mars orbit
+        (2.5, 0.05),    # Belt region
+        (2.8, -0.05),   # Belt region
+    ]
+
+    for i, pos in enumerate(freelancer_positions):
+        create_ship(
+            world=world,
+            name=f"Freelancer {i + 1}",
+            ship_type=ShipType.FREIGHTER,
+            position=pos,
+            owner_faction_id=freelancer_id,
+            is_trader=True,
+        )
+
     return {
         "player_faction_id": player_faction_id,
         "corporations": corporations,
+        "freelancer_id": freelancer_id,
     }
 
 
@@ -256,6 +297,7 @@ def main() -> None:
     world.add_system(MovementSystem())
     world.add_system(ExtractionSystem(event_bus))
     world.add_system(ProductionSystem(event_bus))
+    world.add_system(PopulationSystem(event_bus))
     world.add_system(ShipAI(event_bus))
     world.add_system(TradeSystem(event_bus))
     world.add_system(EconomySystem(event_bus))

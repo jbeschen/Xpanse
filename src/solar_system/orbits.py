@@ -199,6 +199,10 @@ class MovementSystem(System):
             if entity_manager.has_component(entity, Orbit):
                 continue
 
+            # Skip if entity is locked to a parent body (handled by OrbitalSystem)
+            if entity_manager.has_component(entity, ParentBody):
+                continue
+
             pos = entity_manager.get_component(entity, Position)
             if not pos:
                 continue
@@ -237,9 +241,16 @@ class NavigationSystem(System):
 
     priority = 3  # Run between orbital and movement systems
 
+    def __init__(self) -> None:
+        # Cache of body positions for locking ships to planets
+        self._body_positions: dict[str, Position] = {}
+
     def update(self, dt: float, entity_manager: EntityManager) -> None:
         """Update velocities to move towards targets with acceleration/deceleration."""
         dt_days = dt / 60.0  # Same conversion as other systems
+
+        # Cache celestial body positions for ship locking
+        self._update_body_cache(entity_manager)
 
         for entity, nav in entity_manager.get_all_components(NavigationTarget):
             pos = entity_manager.get_component(entity, Position)
@@ -247,6 +258,10 @@ class NavigationSystem(System):
 
             if not pos or not vel:
                 continue
+
+            # If ship has a ParentBody, it's locked - remove it to start moving
+            if entity_manager.has_component(entity, ParentBody):
+                entity_manager.remove_component(entity, ParentBody)
 
             # Calculate direction and distance to target
             dx = nav.target_x - pos.x
@@ -261,6 +276,9 @@ class NavigationSystem(System):
                 vel.vx = 0.0
                 vel.vy = 0.0
                 nav.current_speed = 0.0
+
+                # Lock ship to nearest celestial body so it moves with the planet
+                self._lock_to_nearest_body(entity, pos, entity_manager)
                 continue
 
             # Normalize direction
@@ -289,7 +307,52 @@ class NavigationSystem(System):
                 vel.vx = 0.0
                 vel.vy = 0.0
                 nav.current_speed = 0.0
+
+                # Lock ship to nearest celestial body
+                self._lock_to_nearest_body(entity, pos, entity_manager)
             else:
                 # Set velocity - MovementSystem will apply it
                 vel.vx = dir_x * nav.current_speed
                 vel.vy = dir_y * nav.current_speed
+
+    def _update_body_cache(self, entity_manager: EntityManager) -> None:
+        """Cache celestial body positions for ship locking."""
+        from ..entities.celestial import CelestialBody
+
+        self._body_positions.clear()
+        for entity, body in entity_manager.get_all_components(CelestialBody):
+            pos = entity_manager.get_component(entity, Position)
+            if pos and entity.name:
+                self._body_positions[entity.name] = pos
+
+    def _lock_to_nearest_body(
+        self,
+        entity,
+        pos: Position,
+        entity_manager: EntityManager
+    ) -> None:
+        """Lock a ship to the nearest celestial body so it moves with the planet."""
+        nearest_body = None
+        nearest_dist = float('inf')
+        nearest_pos = None
+
+        for body_name, body_pos in self._body_positions.items():
+            dx = body_pos.x - pos.x
+            dy = body_pos.y - pos.y
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist < nearest_dist:
+                nearest_dist = dist
+                nearest_body = body_name
+                nearest_pos = body_pos
+
+        if nearest_body and nearest_pos:
+            # Calculate offset from body
+            offset_x = pos.x - nearest_pos.x
+            offset_y = pos.y - nearest_pos.y
+
+            # Add ParentBody component to lock ship to this body
+            entity_manager.add_component(entity, ParentBody(
+                parent_name=nearest_body,
+                offset_x=offset_x,
+                offset_y=offset_y
+            ))

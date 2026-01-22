@@ -9,7 +9,7 @@ from ..core.ecs import Component, Entity
 from ..core.world import World
 from ..solar_system.orbits import Position, ParentBody
 from ..simulation.resources import ResourceType, Inventory
-from ..simulation.economy import Market
+from ..simulation.economy import Market, MarketType, Population
 from ..simulation.production import Producer, Extractor, RECIPES
 
 if TYPE_CHECKING:
@@ -46,6 +46,7 @@ STATION_CONFIGS: dict[StationType, dict] = {
         "buys": [ResourceType.WATER, ResourceType.FUEL],
         "sells": [],
         "credits": 5000,
+        "market_type": MarketType.STATION,
     },
     StationType.MINING_STATION: {
         "capacity": 2000,
@@ -56,6 +57,7 @@ STATION_CONFIGS: dict[StationType, dict] = {
             ResourceType.SILICATES, ResourceType.RARE_EARTHS, ResourceType.HELIUM3
         ],
         "credits": 10000,
+        "market_type": MarketType.MINING,
     },
     StationType.REFINERY: {
         "capacity": 3000,
@@ -69,6 +71,7 @@ STATION_CONFIGS: dict[StationType, dict] = {
             ResourceType.WATER, ResourceType.FUEL
         ],
         "credits": 20000,
+        "market_type": MarketType.STATION,
     },
     StationType.FACTORY: {
         "capacity": 4000,
@@ -81,6 +84,7 @@ STATION_CONFIGS: dict[StationType, dict] = {
             ResourceType.ELECTRONICS, ResourceType.MACHINERY, ResourceType.LIFE_SUPPORT
         ],
         "credits": 50000,
+        "market_type": MarketType.STATION,
     },
     StationType.COLONY: {
         "capacity": 10000,
@@ -91,6 +95,7 @@ STATION_CONFIGS: dict[StationType, dict] = {
         ],
         "sells": [],  # Colonies consume but produce services/labor
         "credits": 100000,
+        "market_type": MarketType.COLONY,  # Higher prices for frontier colonies
     },
     StationType.SHIPYARD: {
         "capacity": 5000,
@@ -101,6 +106,7 @@ STATION_CONFIGS: dict[StationType, dict] = {
         ],
         "sells": [ResourceType.SHIP_COMPONENTS],
         "credits": 75000,
+        "market_type": MarketType.STATION,
     },
     StationType.TRADE_HUB: {
         "capacity": 20000,
@@ -108,6 +114,7 @@ STATION_CONFIGS: dict[StationType, dict] = {
         "buys": list(ResourceType),  # Buys everything
         "sells": list(ResourceType),  # Sells everything
         "credits": 200000,
+        "market_type": MarketType.STATION,
     },
 }
 
@@ -182,7 +189,11 @@ def create_station(
     em.add_component(entity, inventory)
 
     # Add market
-    market = Market(credits=config["credits"])
+    market_type = config.get("market_type", MarketType.STATION)
+    market = Market(
+        credits=config["credits"],
+        market_type=market_type,
+    )
 
     # Set up what this station buys/sells
     for resource in config["buys"]:
@@ -194,6 +205,15 @@ def create_station(
         market.target_stock[resource] = config["capacity"] / 5
 
     em.add_component(entity, market)
+
+    # Add population for colonies
+    if station_type == StationType.COLONY:
+        em.add_component(entity, Population(
+            population=10.0,  # Start with 10k population
+            max_population=1000.0,
+            growth_rate=0.01,
+            credits_per_pop=10.0,
+        ))
 
     # Add producer if station has recipes
     if config["recipes"]:
@@ -251,6 +271,109 @@ def create_mining_station(
         resource_type=resource_type,
         richness=1.0,
         remaining=float('inf'),  # Mining stations don't deplete
+    ))
+
+    return entity
+
+
+def create_earth_market(
+    world: World,
+    position: tuple[float, float],
+    owner_faction_id: UUID | None = None,
+) -> Entity:
+    """Create Earth as a major consumer hub with large population and market.
+
+    Earth has:
+    - Large population generating constant demand
+    - Lower prices due to competition (MarketType.EARTH)
+    - Buys all processed and finished goods
+    - High credits for purchasing
+
+    Args:
+        world: The game world
+        position: Earth's position in AU
+        owner_faction_id: Earth Coalition faction ID
+
+    Returns:
+        The created entity
+    """
+    # Create entity
+    tags = {"station", "earth_market", "population_center"}
+    if owner_faction_id:
+        tags.add("owned")
+
+    entity = world.create_entity(name="Earth Market", tags=tags)
+    em = world.entity_manager
+
+    # Add station component
+    em.add_component(entity, Station(
+        station_type=StationType.TRADE_HUB,
+        parent_body="Earth",
+        owner_faction_id=owner_faction_id,
+    ))
+
+    # Add position locked to Earth
+    em.add_component(entity, Position(x=position[0], y=position[1]))
+    em.add_component(entity, ParentBody(
+        parent_name="Earth",
+        offset_x=0.01,
+        offset_y=0.01,
+    ))
+
+    # Large inventory capacity
+    inventory = Inventory(capacity=100000)
+    # Start with some resources for initial trades
+    inventory.add(ResourceType.FUEL, 500)
+    inventory.add(ResourceType.WATER, 500)
+    em.add_component(entity, inventory)
+
+    # Earth market - low prices due to competition
+    market = Market(
+        credits=10000000,  # 10 million credits
+        market_type=MarketType.EARTH,
+    )
+
+    # Earth buys all processed goods (Tier 1+)
+    earth_buys = [
+        # Tier 1 - Basic materials
+        ResourceType.REFINED_METAL,
+        ResourceType.SILICON,
+        ResourceType.WATER,
+        ResourceType.FUEL,
+        # Tier 2 - Components
+        ResourceType.ELECTRONICS,
+        ResourceType.MACHINERY,
+        ResourceType.LIFE_SUPPORT,
+        # Tier 3 - Complex goods
+        ResourceType.HABITAT_MODULES,
+        ResourceType.SHIP_COMPONENTS,
+        ResourceType.ADVANCED_TECH,
+    ]
+
+    for resource in earth_buys:
+        market.buys[resource] = True
+        market.target_stock[resource] = 10000  # High demand
+
+    # Earth also sells fuel and water (for ships)
+    market.sells[ResourceType.FUEL] = True
+    market.sells[ResourceType.WATER] = True
+    market.target_stock[ResourceType.FUEL] = 1000
+    market.target_stock[ResourceType.WATER] = 1000
+
+    em.add_component(entity, market)
+
+    # Large population - creates constant demand
+    em.add_component(entity, Population(
+        population=10000.0,  # 10 billion people (in thousands)
+        max_population=50000.0,
+        growth_rate=0.001,  # Slow growth - mature population
+        credits_per_pop=5.0,  # Lower per-capita but huge volume
+        consumption={
+            ResourceType.LIFE_SUPPORT: 0.5,
+            ResourceType.WATER: 0.2,
+            ResourceType.ELECTRONICS: 0.1,
+            ResourceType.MACHINERY: 0.05,
+        },
     ))
 
     return entity

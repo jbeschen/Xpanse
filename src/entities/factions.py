@@ -85,6 +85,12 @@ PREDEFINED_FACTIONS: dict[str, dict] = {
         "credits": 350000,
         "description": "Manufacturing giant based on Titan.",
     },
+    "Freelancers": {
+        "type": FactionType.INDEPENDENT,
+        "color": (180, 180, 180),
+        "credits": 500000,
+        "description": "Independent traders, haulers, and mercenaries operating throughout the system.",
+    },
 }
 
 
