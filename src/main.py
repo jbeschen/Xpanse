@@ -10,6 +10,7 @@ from .solar_system.orbits import OrbitalSystem, MovementSystem, NavigationSystem
 from .simulation.production import ProductionSystem, ExtractionSystem
 from .simulation.economy import EconomySystem, PopulationSystem
 from .simulation.trade import TradeSystem
+from .simulation.events import EventSystem, DiscoverySystem
 from .ai.faction_ai import FactionAI
 from .ai.ship_ai import ShipAI
 from .ui.camera import Camera
@@ -298,9 +299,11 @@ def main() -> None:
     world.add_system(ExtractionSystem(event_bus))
     world.add_system(ProductionSystem(event_bus))
     world.add_system(PopulationSystem(event_bus))
+    world.add_system(DiscoverySystem(event_bus))
     world.add_system(ShipAI(event_bus))
     world.add_system(TradeSystem(event_bus))
     world.add_system(EconomySystem(event_bus))
+    world.add_system(EventSystem(event_bus))
     world.add_system(building_system)
     world.add_system(faction_ai)
 
@@ -474,9 +477,13 @@ def main() -> None:
         # W key enters waypoint mode for selected ship
         renderer.enter_waypoint_mode()
 
+    def on_news() -> None:
+        renderer.toggle_news_feed()
+
     input_handler.register_callback(InputAction.TRADE_ROUTE, on_trade_route)
     input_handler.register_callback(InputAction.HELP, on_help)
     input_handler.register_callback(InputAction.WAYPOINT, on_waypoint)
+    input_handler.register_callback(InputAction.NEWS, on_news)
 
     # Main game loop
     running = True
@@ -572,6 +579,25 @@ def main() -> None:
                 elif active_menu == MenuId.HELP:
                     # Help panel doesn't need input, ESC already handled above
                     pass
+
+                elif active_menu == MenuId.NEWS_FEED:
+                    # News feed panel keyboard handling
+                    action = renderer.news_feed.handle_key(event.key)
+                    if action == "close":
+                        renderer.menu_manager.close_top()
+                    elif action == "accept_contract":
+                        # Accept the selected contract
+                        from src.simulation.events import EventManager, accept_contract
+                        for entity, em in world.entity_manager.get_all_components(EventManager):
+                            contracts = [c for c in em.available_contracts if not c.accepted]
+                            if contracts and 0 <= renderer.news_feed.selected_contract < len(contracts):
+                                contract = contracts[renderer.news_feed.selected_contract]
+                                if accept_contract(world.entity_manager, contract.id, player_faction_id):
+                                    renderer.notifications.add_notification(
+                                        f"Contract accepted: {contract.title}",
+                                        duration=3.0
+                                    )
+                            break
 
         # Update mouse world position for renderer
         renderer.update_mouse_position(

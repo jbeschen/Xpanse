@@ -28,6 +28,7 @@ class MenuId(Enum):
     TRADE_MANAGER = auto()
     HELP = auto()
     WAYPOINT_MODE = auto()  # Not a menu but a modal mode
+    NEWS_FEED = auto()  # News, events, and contracts panel
 
 
 class MenuManager:
@@ -1797,3 +1798,356 @@ class TradeRouteManagerPanel(Panel):
                 ctrl_surf = font.render(ctrl, True, (150, 150, 150))
                 surface.blit(ctrl_surf, (self.x + 10, y))
                 y += line_height - 2
+
+
+class NewsFeedPanel:
+    """Panel showing news, events, contracts, and discoveries."""
+
+    def __init__(self, x: int, y: int, width: int, height: int) -> None:
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.visible = False
+        self.bg_color = (20, 25, 35, 230)
+        self.border_color = (80, 100, 140)
+
+        # Tabs: News, Events, Contracts, Discoveries
+        self.tabs = ["News", "Events", "Contracts", "Discoveries"]
+        self.active_tab = 0
+
+        # Scrolling
+        self.scroll_offset = 0
+        self.max_scroll = 0
+
+        # Selection for contracts
+        self.selected_contract = 0
+
+    def handle_key(self, key: int) -> str | None:
+        """Handle keyboard input. Returns action if any."""
+        if key == pygame.K_TAB:
+            # Cycle tabs
+            self.active_tab = (self.active_tab + 1) % len(self.tabs)
+            self.scroll_offset = 0
+            return "tab_changed"
+
+        elif key == pygame.K_UP:
+            if self.active_tab == 2:  # Contracts
+                self.selected_contract = max(0, self.selected_contract - 1)
+            else:
+                self.scroll_offset = max(0, self.scroll_offset - 1)
+            return "scroll"
+
+        elif key == pygame.K_DOWN:
+            if self.active_tab == 2:  # Contracts
+                self.selected_contract += 1
+            else:
+                self.scroll_offset = min(self.max_scroll, self.scroll_offset + 1)
+            return "scroll"
+
+        elif key == pygame.K_RETURN and self.active_tab == 2:
+            return "accept_contract"
+
+        elif key == pygame.K_ESCAPE:
+            return "close"
+
+        return None
+
+    def render(self, surface: pygame.Surface, world: "World") -> None:
+        """Render the news feed panel."""
+        if not self.visible:
+            return
+
+        font = pygame.font.Font(None, 22)
+        small_font = pygame.font.Font(None, 18)
+        title_font = pygame.font.Font(None, 28)
+
+        # Background
+        panel_surface = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
+        panel_surface.fill(self.bg_color)
+        surface.blit(panel_surface, (self.x, self.y))
+
+        # Border
+        pygame.draw.rect(
+            surface, self.border_color,
+            (self.x, self.y, self.width, self.height), 2
+        )
+
+        # Title
+        title = title_font.render("GALACTIC NEWS NETWORK", True, (200, 220, 255))
+        surface.blit(title, (self.x + 10, self.y + 8))
+
+        # Tabs
+        tab_y = self.y + 40
+        tab_width = (self.width - 20) // len(self.tabs)
+        for i, tab_name in enumerate(self.tabs):
+            tab_x = self.x + 10 + i * tab_width
+            is_active = i == self.active_tab
+
+            # Tab background
+            tab_color = (60, 80, 120) if is_active else (40, 50, 70)
+            pygame.draw.rect(surface, tab_color, (tab_x, tab_y, tab_width - 5, 25))
+
+            # Tab text
+            text_color = (255, 255, 255) if is_active else (150, 150, 150)
+            tab_text = font.render(tab_name, True, text_color)
+            surface.blit(tab_text, (tab_x + 5, tab_y + 4))
+
+        # Content area
+        content_y = tab_y + 35
+        content_height = self.height - 90
+
+        # Get data from event manager
+        from ..simulation.events import get_news_feed, get_active_events, get_available_contracts, EventManager
+
+        news = []
+        events = []
+        contracts = []
+        discoveries = []
+
+        for entity, em in world.entity_manager.get_all_components(EventManager):
+            news = em.news_feed[:15]
+            events = em.active_events
+            contracts = [c for c in em.available_contracts if not c.accepted]
+            discoveries = em.pending_discoveries
+            break
+
+        line_height = 20
+
+        if self.active_tab == 0:
+            # News tab
+            self._render_news(surface, font, small_font, news, content_y, content_height, line_height)
+
+        elif self.active_tab == 1:
+            # Events tab
+            self._render_events(surface, font, small_font, events, content_y, content_height, line_height)
+
+        elif self.active_tab == 2:
+            # Contracts tab
+            self._render_contracts(surface, font, small_font, contracts, content_y, content_height, line_height)
+
+        elif self.active_tab == 3:
+            # Discoveries tab
+            self._render_discoveries(surface, font, small_font, discoveries, content_y, content_height, line_height)
+
+        # Footer with controls
+        footer_y = self.y + self.height - 25
+        pygame.draw.line(surface, self.border_color, (self.x + 5, footer_y - 5), (self.x + self.width - 5, footer_y - 5), 1)
+        controls = small_font.render("Tab: Switch | ↑↓: Scroll | Enter: Accept | N/Esc: Close", True, (120, 120, 140))
+        surface.blit(controls, (self.x + 10, footer_y))
+
+    def _render_news(self, surface, font, small_font, news, y, height, line_height):
+        """Render news items."""
+        if not news:
+            no_news = font.render("No recent news", True, (100, 100, 100))
+            surface.blit(no_news, (self.x + 20, y + 20))
+            return
+
+        # Importance colors
+        importance_colors = {
+            1: (150, 150, 150),
+            2: (200, 200, 200),
+            3: (255, 200, 100),
+            4: (255, 150, 100),
+            5: (255, 100, 100),
+        }
+
+        # Category icons
+        category_symbols = {
+            "economic": "$",
+            "disaster": "!",
+            "political": "⚑",
+            "discovery": "★",
+            "crime": "⚠",
+            "technology": "⚙",
+        }
+
+        current_y = y
+        for i, item in enumerate(news[self.scroll_offset:]):
+            if current_y > y + height - line_height * 2:
+                break
+
+            color = importance_colors.get(item.importance, (150, 150, 150))
+            symbol = category_symbols.get(item.category.value, "•")
+
+            # Headline
+            headline = f"{symbol} {item.headline[:45]}"
+            headline_surf = font.render(headline, True, color)
+            surface.blit(headline_surf, (self.x + 15, current_y))
+            current_y += line_height
+
+            # Body (truncated)
+            if item.body:
+                body = item.body[:60] + "..." if len(item.body) > 60 else item.body
+                body_surf = small_font.render(body, True, (120, 120, 140))
+                surface.blit(body_surf, (self.x + 25, current_y))
+                current_y += line_height
+
+            current_y += 5  # Spacing
+
+        self.max_scroll = max(0, len(news) - 5)
+
+    def _render_events(self, surface, font, small_font, events, y, height, line_height):
+        """Render active events."""
+        if not events:
+            no_events = font.render("No active events", True, (100, 100, 100))
+            surface.blit(no_events, (self.x + 20, y + 20))
+            return
+
+        # Severity colors
+        severity_colors = {
+            "minor": (150, 200, 150),
+            "moderate": (200, 200, 100),
+            "major": (255, 150, 100),
+            "critical": (255, 100, 100),
+        }
+
+        current_y = y
+        for event in events[self.scroll_offset:]:
+            if current_y > y + height - line_height * 3:
+                break
+
+            color = severity_colors.get(event.severity.value, (150, 150, 150))
+
+            # Title
+            title_surf = font.render(event.title[:40], True, color)
+            surface.blit(title_surf, (self.x + 15, current_y))
+            current_y += line_height
+
+            # Duration remaining
+            if event.duration > 0:
+                mins = int(event.duration // 60)
+                secs = int(event.duration % 60)
+                duration_text = f"Time remaining: {mins}m {secs}s"
+                duration_surf = small_font.render(duration_text, True, (100, 100, 100))
+                surface.blit(duration_surf, (self.x + 25, current_y))
+                current_y += line_height
+
+            # Effects
+            effects = []
+            if event.price_modifier != 1.0:
+                change = int((event.price_modifier - 1.0) * 100)
+                sign = "+" if change > 0 else ""
+                effects.append(f"Price: {sign}{change}%")
+            if event.supply_modifier != 1.0:
+                change = int((event.supply_modifier - 1.0) * 100)
+                sign = "+" if change > 0 else ""
+                effects.append(f"Supply: {sign}{change}%")
+
+            if effects:
+                effects_text = " | ".join(effects)
+                effects_surf = small_font.render(effects_text, True, (150, 150, 200))
+                surface.blit(effects_surf, (self.x + 25, current_y))
+                current_y += line_height
+
+            current_y += 8
+
+        self.max_scroll = max(0, len(events) - 3)
+
+    def _render_contracts(self, surface, font, small_font, contracts, y, height, line_height):
+        """Render available contracts."""
+        if not contracts:
+            no_contracts = font.render("No contracts available", True, (100, 100, 100))
+            surface.blit(no_contracts, (self.x + 20, y + 20))
+
+            hint = small_font.render("Contracts appear when stations need supplies", True, (80, 80, 80))
+            surface.blit(hint, (self.x + 20, y + 45))
+            return
+
+        current_y = y
+        self.selected_contract = min(self.selected_contract, len(contracts) - 1)
+
+        for i, contract in enumerate(contracts):
+            if current_y > y + height - line_height * 4:
+                break
+
+            is_selected = i == self.selected_contract
+            bg_color = (50, 60, 80) if is_selected else None
+
+            if bg_color:
+                pygame.draw.rect(surface, bg_color, (self.x + 10, current_y - 2, self.width - 20, line_height * 3 + 10))
+
+            # Title
+            color = (255, 220, 100) if is_selected else (200, 200, 200)
+            title_surf = font.render(contract.title[:40], True, color)
+            surface.blit(title_surf, (self.x + 15, current_y))
+            current_y += line_height
+
+            # Details
+            resource_name = contract.resource.value.replace("_", " ").title()
+            details = f"{contract.amount:.0f} {resource_name} → {contract.client_name[:20]}"
+            details_surf = small_font.render(details, True, (150, 150, 150))
+            surface.blit(details_surf, (self.x + 25, current_y))
+            current_y += line_height
+
+            # Reward and deadline
+            reward_text = f"Reward: {contract.reward:,.0f}cr"
+            if contract.bonus_reward > 0:
+                reward_text += f" (+{contract.bonus_reward:,.0f} bonus)"
+            reward_surf = small_font.render(reward_text, True, (100, 200, 100))
+            surface.blit(reward_surf, (self.x + 25, current_y))
+
+            # Deadline
+            mins = int(contract.deadline // 60)
+            deadline_color = (255, 100, 100) if mins < 3 else (150, 150, 150)
+            deadline_surf = small_font.render(f"Deadline: {mins}m", True, deadline_color)
+            surface.blit(deadline_surf, (self.x + self.width - 100, current_y))
+
+            current_y += line_height + 10
+
+        # Selection hint
+        if contracts:
+            hint = small_font.render("Press Enter to accept selected contract", True, (100, 150, 100))
+            surface.blit(hint, (self.x + 15, y + height - line_height))
+
+    def _render_discoveries(self, surface, font, small_font, discoveries, y, height, line_height):
+        """Render pending discoveries."""
+        if not discoveries:
+            no_disc = font.render("No pending discoveries", True, (100, 100, 100))
+            surface.blit(no_disc, (self.x + 20, y + 20))
+
+            hint = small_font.render("Ships may discover anomalies while traveling", True, (80, 80, 80))
+            surface.blit(hint, (self.x + 20, y + 45))
+            return
+
+        # Discovery type colors
+        type_colors = {
+            "derelict": (200, 150, 100),
+            "anomaly": (150, 150, 255),
+            "debris": (150, 150, 150),
+            "signal": (255, 200, 100),
+        }
+
+        current_y = y
+        for discovery in discoveries[self.scroll_offset:]:
+            if current_y > y + height - line_height * 3:
+                break
+
+            color = type_colors.get(discovery.discovery_type, (150, 150, 150))
+
+            # Title
+            title_surf = font.render(discovery.title, True, color)
+            surface.blit(title_surf, (self.x + 15, current_y))
+            current_y += line_height
+
+            # Description
+            desc_surf = small_font.render(discovery.description[:50], True, (120, 120, 140))
+            surface.blit(desc_surf, (self.x + 25, current_y))
+            current_y += line_height
+
+            # Rewards
+            rewards = []
+            if discovery.reward_credits > 0:
+                rewards.append(f"{discovery.reward_credits:,.0f}cr")
+            for res, amt in discovery.reward_resources.items():
+                rewards.append(f"{amt:.0f} {res.value.replace('_', ' ')}")
+
+            if rewards:
+                reward_text = "Rewards: " + ", ".join(rewards[:3])
+                reward_surf = small_font.render(reward_text, True, (100, 200, 100))
+                surface.blit(reward_surf, (self.x + 25, current_y))
+                current_y += line_height
+
+            current_y += 8
+
+        self.max_scroll = max(0, len(discoveries) - 3)

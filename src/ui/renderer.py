@@ -11,7 +11,7 @@ from .panels import (
     InfoPanel, StatusBar, MiniMap, BuildMenuPanel, PlayerHUD,
     ShipPurchasePanel, NotificationPanel, PriceHistoryGraph, UpgradePanel,
     TradeRoutePanel, HelpPanel, ContextPrompt, TradeRouteManagerPanel,
-    ResourceSelectionPanel, MenuManager, MenuId
+    ResourceSelectionPanel, MenuManager, MenuId, NewsFeedPanel
 )
 from ..entities.stations import StationType
 from ..entities.ships import ShipType
@@ -68,6 +68,11 @@ class Renderer:
             x=SCREEN_WIDTH // 2 - 140, y=SCREEN_HEIGHT // 2 - 100
         )
         self.resource_selection.visible = False
+        self.news_feed = NewsFeedPanel(
+            x=SCREEN_WIDTH // 2 - 200, y=SCREEN_HEIGHT // 2 - 200,
+            width=400, height=400
+        )
+        self.news_feed.visible = False
 
         # Menu manager - handles focus stack for all menus
         self.menu_manager = MenuManager()
@@ -122,6 +127,9 @@ class Renderer:
         self.menu_manager.register_close_callback(
             MenuId.WAYPOINT_MODE, self._on_close_waypoint_mode
         )
+        self.menu_manager.register_close_callback(
+            MenuId.NEWS_FEED, self._on_close_news_feed
+        )
 
     def _on_close_build_menu(self) -> None:
         """Called when build menu is closed."""
@@ -158,6 +166,10 @@ class Renderer:
         self.waypoint_ship_name = ""
         self.context_prompt.visible = False
 
+    def _on_close_news_feed(self) -> None:
+        """Called when news feed is closed."""
+        self.news_feed.visible = False
+
     # Menu visibility properties - delegate to menu manager
     @property
     def build_menu_visible(self) -> bool:
@@ -190,6 +202,20 @@ class Renderer:
     @property
     def resource_selection_visible(self) -> bool:
         return self.menu_manager.is_open(MenuId.RESOURCE_SELECTION)
+
+    @property
+    def news_feed_visible(self) -> bool:
+        return self.menu_manager.is_open(MenuId.NEWS_FEED)
+
+    def toggle_news_feed(self) -> None:
+        """Toggle the news feed panel."""
+        if self.news_feed_visible:
+            self.menu_manager.pop(MenuId.NEWS_FEED)
+            self.news_feed.visible = False
+        else:
+            self.menu_manager.close_all()
+            self.menu_manager.push(MenuId.NEWS_FEED)
+            self.news_feed.visible = True
 
     def set_player_faction(self, faction_id: UUID | None, world: "World") -> None:
         """Set the player faction for highlighting."""
@@ -905,6 +931,10 @@ class Renderer:
         # Render help panel (on top of everything)
         if self.help_visible:
             self.help_panel.draw(self.screen, self.font)
+
+        # Render news feed panel
+        if self.news_feed_visible:
+            self.news_feed.render(self.screen, world)
 
     def _render_orbits(self, world: World) -> None:
         """Render orbital paths."""

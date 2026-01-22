@@ -37,6 +37,7 @@ class InputAction(Enum):
     TRADE_ROUTE = "trade_route"  # Open trade route setup
     HELP = "help"  # Toggle help window
     WAYPOINT = "waypoint"  # Set ship waypoint mode
+    NEWS = "news"  # Toggle news/events panel
 
 
 @dataclass
@@ -217,6 +218,9 @@ class InputHandler:
         elif event.key == pygame.K_w:
             # W triggers waypoint mode - main.py will check if ship is selected
             self._fire_action(InputAction.WAYPOINT)
+
+        elif event.key == pygame.K_n:
+            self._fire_action(InputAction.NEWS)
 
         elif event.key == pygame.K_q:
             self._fire_action(InputAction.QUIT)
