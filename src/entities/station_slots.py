@@ -16,16 +16,30 @@ if TYPE_CHECKING:
 # Maximum stations per celestial body
 MAX_STATIONS_PER_BODY = 12
 
-# Orbital rings (distance from body center in AU)
+# Orbital rings for stations (distance from body center in AU)
 ORBITAL_RINGS = [0.03, 0.05, 0.07]
 
-# Clock positions (in radians, 12 o'clock = pi/2, clockwise)
+# Clock positions for STATIONS (in radians, 12 o'clock = pi/2, clockwise)
+# Stations at: 12, 3, 6, 9 o'clock
 CLOCK_POSITIONS = {
     12: math.pi / 2,      # 12 o'clock (top)
     3: 0,                  # 3 o'clock (right)
     6: -math.pi / 2,       # 6 o'clock (bottom)
     9: math.pi,            # 9 o'clock (left)
 }
+
+# Ship parking system - 45 degrees offset from station slots
+# Ships park at: 1:30, 4:30, 7:30, 10:30 (between stations)
+SHIP_PARKING_RINGS = [0.025, 0.04, 0.06]  # Slightly inside station rings
+SHIP_PARKING_ANGLES = [
+    math.pi / 4,      # 1:30 o'clock (45°)
+    -math.pi / 4,     # 4:30 o'clock (-45°)
+    -3 * math.pi / 4, # 7:30 o'clock (-135°)
+    3 * math.pi / 4,  # 10:30 o'clock (135°)
+]
+
+# Total ship parking slots: 3 rings × 4 positions = 12 per body
+MAX_SHIP_PARKING_SLOTS = 12
 
 # All 12 slots: 4 positions x 3 rings
 # Slot index maps to (ring_index, clock_position)
@@ -259,3 +273,134 @@ def generate_unique_station_name(
 
     # Fallback: use guaranteed unique format
     return f"{station_type.value.upper()}-{body_name[:3].upper()}-{slot_index:02d}-{random.randint(100, 999)}"
+
+
+# Ship Parking Slot System
+
+@dataclass
+class ShipParkingManager(Component):
+    """Singleton component tracking ship parking around celestial bodies.
+
+    Ships park in 3 concentric rings at 45-degree offsets from station slots,
+    preventing visual overlap between ships and stations.
+    """
+    # Maps body_name -> {slot_index: ship_entity_id}
+    parking_assignments: dict[str, dict[int, UUID]] = field(default_factory=dict)
+    # Maps ship_id -> (body_name, slot_index) for reverse lookup
+    ship_locations: dict[UUID, tuple[str, int]] = field(default_factory=dict)
+
+    def get_available_slot(self, body_name: str) -> int | None:
+        """Get an available parking slot for a body.
+
+        Returns:
+            Slot index (0-11) or None if full
+        """
+        assigned = self.parking_assignments.get(body_name, {})
+        for slot in range(MAX_SHIP_PARKING_SLOTS):
+            if slot not in assigned:
+                return slot
+        return None
+
+    def assign_parking(self, body_name: str, ship_id: UUID, slot_index: int | None = None) -> int | None:
+        """Assign a parking slot to a ship.
+
+        Args:
+            body_name: Name of celestial body
+            ship_id: Ship entity ID
+            slot_index: Optional specific slot (auto-assigns if None)
+
+        Returns:
+            Assigned slot index, or None if no slots available
+        """
+        # Release any existing assignment for this ship
+        self.release_parking(ship_id)
+
+        if body_name not in self.parking_assignments:
+            self.parking_assignments[body_name] = {}
+
+        # Auto-assign if no slot specified
+        if slot_index is None:
+            slot_index = self.get_available_slot(body_name)
+            if slot_index is None:
+                return None
+
+        # Check if slot is available
+        if slot_index in self.parking_assignments[body_name]:
+            # Slot taken, try to find another
+            slot_index = self.get_available_slot(body_name)
+            if slot_index is None:
+                return None
+
+        self.parking_assignments[body_name][slot_index] = ship_id
+        self.ship_locations[ship_id] = (body_name, slot_index)
+        return slot_index
+
+    def release_parking(self, ship_id: UUID) -> None:
+        """Release a ship's parking slot."""
+        if ship_id not in self.ship_locations:
+            return
+
+        body_name, slot_index = self.ship_locations[ship_id]
+        if body_name in self.parking_assignments:
+            self.parking_assignments[body_name].pop(slot_index, None)
+        del self.ship_locations[ship_id]
+
+    def get_ship_slot(self, ship_id: UUID) -> tuple[str, int] | None:
+        """Get a ship's current parking location."""
+        return self.ship_locations.get(ship_id)
+
+    def get_parked_ships(self, body_name: str) -> list[tuple[int, UUID]]:
+        """Get all ships parked at a body.
+
+        Returns:
+            List of (slot_index, ship_id) tuples
+        """
+        assigned = self.parking_assignments.get(body_name, {})
+        return list(assigned.items())
+
+
+def get_ship_parking_offset(slot_index: int) -> tuple[float, float]:
+    """Get the (x, y) offset for a ship parking slot.
+
+    Args:
+        slot_index: Parking slot index (0-11)
+
+    Returns:
+        (offset_x, offset_y) in AU from body center
+    """
+    if slot_index < 0 or slot_index >= MAX_SHIP_PARKING_SLOTS:
+        slot_index = 0
+
+    # 3 rings × 4 positions
+    ring_index = slot_index // 4
+    angle_index = slot_index % 4
+
+    radius = SHIP_PARKING_RINGS[ring_index]
+    angle = SHIP_PARKING_ANGLES[angle_index]
+
+    offset_x = radius * math.cos(angle)
+    offset_y = radius * math.sin(angle)
+
+    return (offset_x, offset_y)
+
+
+def get_parking_slot_for_station(station_slot: int) -> int:
+    """Get the nearest parking slot for ships visiting a station.
+
+    Maps station slots to nearby parking slots for visual grouping.
+
+    Args:
+        station_slot: Station slot index (0-11)
+
+    Returns:
+        Recommended parking slot index
+    """
+    # Station slots: ring * 4 + clock_pos (where clock is 0=12oclock, 1=3oclock, etc)
+    ring = station_slot // 4
+    clock = station_slot % 4
+
+    # Ship parking is between clock positions, so offset by 0
+    # Clock 0 (12) -> parking position 0 (1:30)
+    # Clock 1 (3) -> parking position 1 (4:30)
+    # etc.
+    return ring * 4 + clock

@@ -101,6 +101,15 @@ class NotificationEvent(Event):
     duration: float = 5.0  # How long to display (seconds)
 
 
+@dataclass
+class DividendEvent(Event):
+    """Fired when a station pays dividends to its owner faction."""
+    station_id: UUID
+    faction_id: UUID
+    amount: float
+    station_name: str = ""
+
+
 EventHandler = Callable[[Event], None]
 
 

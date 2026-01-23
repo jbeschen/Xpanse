@@ -25,6 +25,7 @@ from .ui.input import InputHandler, InputAction
 from .systems.building import BuildingSystem
 from .systems.ship_ai_v2 import ShipAISystemV2
 from .systems.save_load import save_game, load_game
+from .systems.trail_system import TrailSystem
 
 
 def create_initial_world(world: World) -> None:
@@ -192,9 +193,13 @@ def create_competitive_start(world: World) -> dict:
     world.entity_manager.add_component(knowledge_entity, ResourceKnowledge())
 
     # Create OrbitalSlotManager singleton - manages station orbital positions
-    from .entities.station_slots import OrbitalSlotManager
+    from .entities.station_slots import OrbitalSlotManager, ShipParkingManager
     slot_entity = world.create_entity(name="OrbitalSlotManager", tags={"singleton"})
     world.entity_manager.add_component(slot_entity, OrbitalSlotManager())
+
+    # Create ShipParkingManager singleton - manages ship parking around bodies
+    parking_entity = world.create_entity(name="ShipParkingManager", tags={"singleton"})
+    world.entity_manager.add_component(parking_entity, ShipParkingManager())
 
     # Create EventManager singleton for events, contracts, discoveries
     event_entity = world.create_entity(name="EventManager", tags={"singleton"})
@@ -455,6 +460,7 @@ def main() -> None:
     world.add_system(OrbitalSystem())
     world.add_system(NavigationSystem())
     world.add_system(MovementSystem())
+    world.add_system(TrailSystem())  # Record ship trails after movement
     world.add_system(ExtractionSystem(event_bus))
     world.add_system(ProductionSystem(event_bus))
     world.add_system(PopulationSystem(event_bus))
@@ -500,9 +506,10 @@ def main() -> None:
     renderer = Renderer(screen, camera)
     renderer.set_player_faction(player_faction_id, world)
     renderer.set_building_system(building_system)
+    renderer.set_ship_ai_system(ship_ai_v2)
 
     # Subscribe to trade events for visual feedback
-    from src.core.events import TradeCompleteEvent, ResourceTransferEvent
+    from src.core.events import TradeCompleteEvent, ResourceTransferEvent, DividendEvent
 
     def on_trade_complete(event: TradeCompleteEvent) -> None:
         """Show notification when a trade completes."""
@@ -527,10 +534,18 @@ def main() -> None:
             source_name = source.name if source else "Unknown"
             target_name = target.name if target else "Unknown"
             msg = f"Cargo: {event.amount:.0f} {resource_name} loaded"
-            renderer.notifications.add_notification(msg, duration=3.0, color=(100, 150, 255))
+            renderer.notifications.add_notification(msg, notification_type="info", duration=3.0)
+
+    def on_dividend(event: DividendEvent) -> None:
+        """Show notification when player receives dividends."""
+        # Only notify for player's faction
+        if event.faction_id == player_faction_id:
+            msg = f"Income: +{event.amount:.0f}cr from {event.station_name}"
+            renderer.notifications.add_notification(msg, notification_type="success", duration=4.0)
 
     event_bus.subscribe(TradeCompleteEvent, on_trade_complete)
     event_bus.subscribe(ResourceTransferEvent, on_resource_transfer)
+    event_bus.subscribe(DividendEvent, on_dividend)
 
     input_handler = InputHandler(camera)
 
@@ -545,6 +560,34 @@ def main() -> None:
         # Check if click is on toolbar first
         if input_handler.state.mouse_y < TOOLBAR_HEIGHT:
             if renderer.handle_toolbar_click(input_handler.state.mouse_x, input_handler.state.mouse_y):
+                return
+
+        # Check sector economy panel clicks (reserve button)
+        if renderer.is_in_sector_view() and renderer.sector_economy.visible:
+            if renderer.sector_economy.handle_click(
+                input_handler.state.mouse_x,
+                input_handler.state.mouse_y
+            ):
+                return
+
+        # PRIORITY 1: Trade manager route creation (must check first!)
+        # Trade routes only work in sector view
+        if renderer.trade_manager_visible and renderer.trade_manager.creating_route:
+            if renderer.is_in_sector_view():
+                station_id = renderer.get_station_at_screen_sector(
+                    input_handler.state.mouse_x,
+                    input_handler.state.mouse_y
+                )
+                if station_id:
+                    station_entity = world.entity_manager.get_entity(station_id)
+                    if station_entity:
+                        renderer.trade_manager_handle_station_click(station_id, station_entity.name)
+                        return
+                else:
+                    renderer.add_notification("Click on a station (not a planet)", "warning")
+                    return
+            else:
+                renderer.add_notification("Enter a sector (double-click planet) to select stations", "warning")
                 return
 
         # Handle sector view selection and building
@@ -601,22 +644,6 @@ def main() -> None:
         # If in waypoint mode, set waypoint
         if renderer.waypoint_mode:
             renderer.set_waypoint(world_x, world_y)
-        # If in build mode, try to place a station
-        elif renderer.build_mode_active:
-            renderer.try_place_station(world_x, world_y, world)
-        # If trade manager is in route creation mode, try to select station
-        elif renderer.trade_manager_visible and renderer.trade_manager.creating_route:
-            # Find station at click position
-            from src.entities.stations import Station
-            from src.solar_system.orbits import Position
-            em = world.entity_manager
-            for entity, station in em.get_all_components(Station):
-                pos = em.get_component(entity, Position)
-                if pos:
-                    dist = ((pos.x - world_x)**2 + (pos.y - world_y)**2)**0.5
-                    if dist < 0.1:
-                        renderer.trade_manager_handle_station_click(entity.id, entity.name)
-                        return
         else:
             renderer.select_at(world_x, world_y, world)
 
@@ -816,17 +843,22 @@ def main() -> None:
     input_handler.register_callback(InputAction.QUICK_LOAD, on_quick_load)
 
     def on_trade_route() -> None:
-        # T key has different behavior depending on state
+        # T key behavior: open trade manager and immediately start route creation
         if renderer.trade_manager_visible:
-            # In trade manager, T starts route creation or advances it
             if renderer.trade_manager.creating_route:
-                # Already creating, this shouldn't happen (click to select)
-                pass
-            else:
+                # Already creating - cancel and restart
+                renderer.trade_manager.cancel_creation()
                 renderer.trade_manager.start_route_creation()
+                renderer.add_notification("Route creation restarted", "info")
+            else:
+                # Start creating a new route
+                renderer.trade_manager.start_route_creation()
+                renderer.add_notification("Click first station for route", "info")
         else:
-            # Open trade manager
+            # Open trade manager and immediately start route creation
             renderer.toggle_trade_manager()
+            renderer.trade_manager.start_route_creation()
+            renderer.add_notification("Click first station for route", "info")
 
     def on_help() -> None:
         renderer.toggle_help()

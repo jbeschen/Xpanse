@@ -223,11 +223,11 @@ class NavigationTarget(Component):
     max_speed: float = 0.10  # AU per day (cruise speed) - X-Drive era
     current_speed: float = 0.0  # Current speed (for acceleration)
     acceleration: float = 0.03  # AU per day per day (how fast we speed up)
-    arrival_threshold: float = 0.05  # AU - larger threshold for orbit capture
+    arrival_threshold: float = 0.005  # AU - tight threshold for station arrival (~750,000 km)
 
     # Target body tracking - if set, coordinates are updated each frame
     target_body_name: str = ""  # Name of celestial body to track
-    orbit_capture_distance: float = 0.1  # AU - distance at which we lock to orbit
+    orbit_capture_distance: float = 0.02  # AU - capture orbit when very close to body
 
     def has_arrived(self, current_pos: Position) -> bool:
         """Check if close enough to target."""
@@ -280,6 +280,11 @@ class NavigationSystem(System):
             # If ship has a ParentBody, it's locked - remove it to start moving
             if entity_manager.has_component(entity, ParentBody):
                 entity_manager.remove_component(entity, ParentBody)
+                # Release parking slot
+                from ..entities.station_slots import ShipParkingManager
+                for _, pm in entity_manager.get_all_components(ShipParkingManager):
+                    pm.release_parking(entity.id)
+                    break
 
             # Update target position if tracking a body
             if nav.target_body_name:
@@ -413,21 +418,41 @@ class NavigationSystem(System):
         body_name: str,
         entity_manager: EntityManager
     ) -> None:
-        """Lock a ship to a specific celestial body."""
+        """Lock a ship to a specific celestial body using parking slots."""
+        from ..entities.station_slots import ShipParkingManager, get_ship_parking_offset
+
         body_pos = self._body_positions.get(body_name)
         if not body_pos:
             return
 
-        # Calculate offset from body center
-        offset_x = pos.x - body_pos.x
-        offset_y = pos.y - body_pos.y
+        # Try to get parking manager and assign a slot
+        parking_manager = None
+        for _, pm in entity_manager.get_all_components(ShipParkingManager):
+            parking_manager = pm
+            break
 
-        # Clamp offset to reasonable orbit distance
-        offset_dist = math.sqrt(offset_x * offset_x + offset_y * offset_y)
-        if offset_dist > 0.1:
-            # Normalize and set to standard orbit distance
-            offset_x = (offset_x / offset_dist) * 0.05
-            offset_y = (offset_y / offset_dist) * 0.05
+        if parking_manager:
+            # Assign a parking slot
+            slot_index = parking_manager.assign_parking(body_name, entity.id)
+            if slot_index is not None:
+                # Use parking slot offset
+                offset_x, offset_y = get_ship_parking_offset(slot_index)
+            else:
+                # No slots available - use fallback position
+                offset_x = pos.x - body_pos.x
+                offset_y = pos.y - body_pos.y
+                offset_dist = math.sqrt(offset_x * offset_x + offset_y * offset_y)
+                if offset_dist > 0.1:
+                    offset_x = (offset_x / offset_dist) * 0.05
+                    offset_y = (offset_y / offset_dist) * 0.05
+        else:
+            # No parking manager - use old behavior
+            offset_x = pos.x - body_pos.x
+            offset_y = pos.y - body_pos.y
+            offset_dist = math.sqrt(offset_x * offset_x + offset_y * offset_y)
+            if offset_dist > 0.1:
+                offset_x = (offset_x / offset_dist) * 0.05
+                offset_y = (offset_y / offset_dist) * 0.05
 
         # Snap position to orbit
         pos.x = body_pos.x + offset_x

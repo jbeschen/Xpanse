@@ -164,7 +164,8 @@ class SectorView:
             bx, by = self.grid_to_screen(body.grid_x, body.grid_y)
             radius = GRID_SIZE * body.radius * 0.4 * self.zoom
             dist = math.sqrt((screen_x - bx)**2 + (screen_y - by)**2)
-            if dist < radius + 10:  # Small buffer for easier clicking
+            # Tighter click radius to avoid overlapping with stations
+            if dist < radius:
                 return body.name
 
         return None
@@ -175,14 +176,22 @@ class SectorView:
         screen_y: int,
         world: "World"
     ) -> UUID | None:
-        """Get the station at a screen position."""
+        """Get the station at a screen position.
+
+        Uses same position calculation as rendering for accurate hit detection.
+        """
         if not self.current_sector:
             return None
 
         from ..entities.stations import Station
-        from ..entities.station_slots import OrbitalSlotManager, get_slot_offset
+        from ..entities.station_slots import OrbitalSlotManager
 
         em = world.entity_manager
+
+        # Find closest station within click range
+        closest_station_id: UUID | None = None
+        closest_dist = float('inf')
+        click_radius = max(30, 30 * self.zoom)  # Minimum 30px radius for easier clicking
 
         for entity, station in em.get_all_components(Station):
             body = self.current_sector.get_body(station.parent_body)
@@ -205,17 +214,18 @@ class SectorView:
             # Calculate orbital position (same as render)
             ring = slot_index // 4
             clock_pos = slot_index % 4
-            orbit_dist = body_radius + (25 + ring * 22) * self.zoom
+            orbit_dist = body_radius + (40 + ring * 28) * self.zoom
             angles = [math.pi / 2, 0, -math.pi / 2, math.pi]
             angle = angles[clock_pos]
             sx = bx + orbit_dist * math.cos(angle)
             sy = by - orbit_dist * math.sin(angle)
 
             dist = math.sqrt((screen_x - sx)**2 + (screen_y - sy)**2)
-            if dist < 18 * self.zoom:  # Station click radius
-                return entity.id
+            if dist < click_radius and dist < closest_dist:
+                closest_dist = dist
+                closest_station_id = entity.id
 
-        return None
+        return closest_station_id
 
     def get_ship_at_screen(
         self,
@@ -261,9 +271,13 @@ class SectorView:
 
         return None
 
-    def update(self, mouse_x: int, mouse_y: int) -> None:
-        """Update hover state."""
+    def update(self, mouse_x: int, mouse_y: int, world: "World" = None) -> None:
+        """Update hover state for bodies and stations."""
         self.hovered_body = self.get_body_at_screen(mouse_x, mouse_y)
+
+        # Also update hovered station if world is provided
+        if world:
+            self.hovered_station_id = self.get_station_at_screen(mouse_x, mouse_y, world)
 
     def render(
         self,
@@ -289,8 +303,14 @@ class SectorView:
         # Draw stations around bodies
         self._render_stations(screen, world, player_faction_id)
 
+        # Draw ship trails (before ships so trails appear behind)
+        self._render_trails(screen, world)
+
         # Draw ships in sector
         self._render_ships(screen, world, player_faction_id)
+
+        # Draw ships in transit (entering/leaving sector)
+        self._render_transit_ships(screen, world)
 
         # Draw build preview if in build mode
         if self.build_mode_active:
@@ -425,7 +445,7 @@ class SectorView:
             clock_pos = slot_index % 4  # 0=top, 1=right, 2=bottom, 3=left
 
             # Orbital distance: body_radius + base offset + ring spacing
-            orbit_dist = body_radius + (25 + ring * 22) * self.zoom
+            orbit_dist = body_radius + (40 + ring * 28) * self.zoom
 
             # Clock position angles (top, right, bottom, left)
             angles = [math.pi / 2, 0, -math.pi / 2, math.pi]
@@ -448,13 +468,19 @@ class SectorView:
                 pygame.draw.circle(screen, station_color, (int(sx), int(sy)),
                                  int(14 * self.zoom), 1)
 
+            # Hover highlight (different from selection)
+            is_hovered = self.hovered_station_id == entity.id
+            if is_hovered:
+                pygame.draw.circle(screen, (100, 200, 255),
+                                 (int(sx), int(sy)), int(20 * self.zoom), 2)
+
             # Selection highlight
             if self.selected_station_id == entity.id:
                 pygame.draw.circle(screen, COLORS['ui_highlight'],
                                  (int(sx), int(sy)), int(18 * self.zoom), 2)
 
             # Draw station name on hover or selection
-            if self.hovered_body == station.parent_body or self.selected_station_id == entity.id:
+            if is_hovered or self.hovered_body == station.parent_body or self.selected_station_id == entity.id:
                 label = self.font.render(entity.name, True, COLORS['ui_text'])
                 screen.blit(label, (sx + 12 * self.zoom, sy - 8))
 
@@ -607,7 +633,18 @@ class SectorView:
                         offset_angle = math.atan2(parent.offset_y, parent.offset_x)
                     else:
                         offset_angle = 0
-                    ship_orbit = body_radius + 15 * self.zoom
+
+                    # Determine visual orbit ring based on offset distance
+                    # Parking rings: 0.025, 0.04, 0.06 AU
+                    # Map to visual offsets: 12, 20, 28 pixels (scaled by zoom)
+                    if offset_dist < 0.032:
+                        ring_offset = 12
+                    elif offset_dist < 0.05:
+                        ring_offset = 20
+                    else:
+                        ring_offset = 28
+
+                    ship_orbit = body_radius + ring_offset * self.zoom
                     sx = bx + ship_orbit * math.cos(offset_angle)
                     sy = by - ship_orbit * math.sin(offset_angle)
                     rendered_ships.add(entity.id)
@@ -759,6 +796,301 @@ class SectorView:
             ]
             points = [(ix + p[0], iy + p[1]) for p in points]
             pygame.draw.polygon(screen, color, points)
+
+    def _render_trails(
+        self,
+        screen: pygame.Surface,
+        world: "World"
+    ) -> None:
+        """Render ship trails in sector view.
+
+        Converts world-space trails to sector grid space for display.
+        """
+        if not self.current_sector:
+            return
+
+        from ..entities.trails import Trail
+        from ..entities.ships import Ship
+        from ..solar_system.orbits import Position, ParentBody
+
+        em = world.entity_manager
+
+        # Build lookup of body world positions
+        body_positions: dict[str, tuple[float, float]] = {}
+        for body in self.current_sector.bodies:
+            for entity in em.get_entities_with(Position):
+                if entity.name == body.name:
+                    pos = em.get_component(entity, Position)
+                    if pos:
+                        body_positions[body.name] = (pos.x, pos.y)
+                    break
+
+        # Get primary body position for reference
+        primary_name = self.current_sector.primary_body
+        if primary_name not in body_positions:
+            return
+        primary_pos = body_positions[primary_name]
+
+        for entity, trail in em.get_all_components(Trail):
+            if not trail.points or len(trail.points) < 2:
+                continue
+
+            # Check if this ship is in this sector
+            ship = em.get_component(entity, Ship)
+            parent = em.get_component(entity, ParentBody)
+
+            # Ship must be in this sector (either parked or nearby)
+            in_sector = False
+            if parent:
+                if self.current_sector.get_body(parent.parent_name):
+                    in_sector = True
+            else:
+                # Check if ship position is near any sector body
+                ship_pos = em.get_component(entity, Position)
+                if ship_pos:
+                    for body in self.current_sector.bodies:
+                        if body.name in body_positions:
+                            bpos = body_positions[body.name]
+                            dist = math.sqrt((ship_pos.x - bpos[0])**2 + (ship_pos.y - bpos[1])**2)
+                            if dist < 0.5:  # Within sector range
+                                in_sector = True
+                                break
+
+            if not in_sector:
+                continue
+
+            # Draw trail segments
+            for i in range(len(trail.points) - 1):
+                p1 = trail.points[i]
+                p2 = trail.points[i + 1]
+
+                # Convert world positions to screen positions
+                # Map world offset from primary to screen space
+                offset1_x = p1.x - primary_pos[0]
+                offset1_y = p1.y - primary_pos[1]
+                offset2_x = p2.x - primary_pos[0]
+                offset2_y = p2.y - primary_pos[1]
+
+                # Scale to screen (rough approximation - sector view uses grid)
+                # Use the primary body's grid position as reference
+                primary_body = self.current_sector.get_body(primary_name)
+                if not primary_body:
+                    continue
+
+                px, py = self.grid_to_screen(primary_body.grid_x, primary_body.grid_y)
+
+                # Scale factor: AU to pixels (approximate)
+                scale = 500 * self.zoom
+
+                x1 = px + offset1_x * scale
+                y1 = py - offset1_y * scale  # Invert Y for screen
+                x2 = px + offset2_x * scale
+                y2 = py - offset2_y * scale
+
+                # Calculate alpha based on age
+                age_ratio = p1.timestamp / trail.max_age
+                alpha = int(255 * (1.0 - age_ratio) * 0.6)
+                alpha = max(0, min(255, alpha))
+
+                if alpha < 10:
+                    continue
+
+                # Trail color with alpha simulation
+                base_color = (100, 180, 255)
+                color = (
+                    int(base_color[0] * alpha / 255),
+                    int(base_color[1] * alpha / 255),
+                    int(base_color[2] * alpha / 255),
+                )
+
+                pygame.draw.line(screen, color, (int(x1), int(y1)), (int(x2), int(y2)), 1)
+
+    def _render_transit_ships(
+        self,
+        screen: pygame.Surface,
+        world: "World"
+    ) -> None:
+        """Render ships in transit to/from this sector at the edges.
+
+        Shows ships approaching sector at the entry edge and ships
+        leaving toward the exit edge, creating visible "traffic".
+        """
+        if not self.current_sector:
+            return
+
+        from ..entities.ships import Ship
+        from ..solar_system.orbits import Position, NavigationTarget, ParentBody
+        from ..entities.factions import Faction
+        from ..solar_system.sectors import get_sector_id_for_body
+
+        em = world.entity_manager
+
+        # Get all bodies in this sector
+        sector_bodies = {body.name for body in self.current_sector.bodies}
+
+        # Build faction color lookup
+        faction_colors: dict[UUID, tuple[int, int, int]] = {}
+        for faction_entity, faction in em.get_all_components(Faction):
+            faction_colors[faction_entity.id] = faction.color
+
+        # Get sector center position for direction calculation
+        primary_body = self.current_sector.get_body(self.current_sector.primary_body)
+        if not primary_body:
+            return
+        center_x, center_y = self.grid_to_screen(primary_body.grid_x, primary_body.grid_y)
+
+        # Screen edges
+        margin = 40
+        left_x = margin
+        right_x = self.screen_width - margin
+        top_y = margin + 60  # Account for title
+        bottom_y = self.screen_height - margin - 30  # Account for nav hint
+
+        for entity, ship in em.get_all_components(Ship):
+            pos = em.get_component(entity, Position)
+            nav_target = em.get_component(entity, NavigationTarget)
+            parent = em.get_component(entity, ParentBody)
+
+            if not pos or not nav_target:
+                continue
+
+            # Skip parked ships (they're rendered by _render_ships)
+            if parent is not None:
+                continue
+
+            # Determine if ship is related to this sector
+            # Check if destination is in this sector
+            dest_in_sector = False
+            if nav_target.target_body_name:
+                dest_in_sector = nav_target.target_body_name in sector_bodies
+
+            # Check if ship is near this sector (origin)
+            ship_near_sector = False
+            for body in self.current_sector.bodies:
+                # Get body's world position
+                for body_entity in em.get_entities_with(Position):
+                    if body_entity.name == body.name:
+                        body_pos = em.get_component(body_entity, Position)
+                        if body_pos:
+                            dist = math.sqrt((pos.x - body_pos.x)**2 + (pos.y - body_pos.y)**2)
+                            if dist < 0.3:  # Within reasonable range
+                                ship_near_sector = True
+                        break
+
+            # Only render if ship is entering or leaving this sector
+            if not dest_in_sector and not ship_near_sector:
+                continue
+
+            # Get ship color
+            ship_color = (150, 180, 220)  # Default blue-ish
+            if ship.owner_faction_id and ship.owner_faction_id in faction_colors:
+                ship_color = faction_colors[ship.owner_faction_id]
+
+            # Calculate edge position based on direction
+            # Ships entering: position at edge, moving toward center
+            # Ships leaving: position moving away from center toward edge
+
+            if dest_in_sector and not ship_near_sector:
+                # Ship approaching sector - render at edge
+                # Calculate which edge based on relative position
+                dx = nav_target.target_x - pos.x
+                dy = nav_target.target_y - pos.y
+
+                # Normalize and determine edge
+                if abs(dx) > abs(dy):
+                    # Horizontal movement dominant
+                    if dx > 0:
+                        # Coming from left
+                        edge_x = left_x + 20
+                    else:
+                        # Coming from right
+                        edge_x = right_x - 20
+                    # Vertical position based on dy
+                    edge_y = center_y - dy * 50  # Scale for visibility
+                    edge_y = max(top_y, min(bottom_y, edge_y))
+                else:
+                    # Vertical movement dominant
+                    if dy > 0:
+                        # Coming from bottom
+                        edge_y = bottom_y - 20
+                    else:
+                        # Coming from top
+                        edge_y = top_y + 20
+                    edge_x = center_x + dx * 50
+                    edge_x = max(left_x, min(right_x, edge_x))
+
+                # Draw ship at edge with "entering" indicator
+                self._draw_edge_ship(screen, int(edge_x), int(edge_y), ship_color, entering=True)
+
+            elif ship_near_sector and not dest_in_sector:
+                # Ship leaving sector - render moving toward edge
+                dx = nav_target.target_x - pos.x
+                dy = nav_target.target_y - pos.y
+
+                if abs(dx) > abs(dy):
+                    if dx > 0:
+                        edge_x = right_x - 30
+                    else:
+                        edge_x = left_x + 30
+                    edge_y = center_y - dy * 50
+                    edge_y = max(top_y, min(bottom_y, edge_y))
+                else:
+                    if dy > 0:
+                        edge_y = top_y + 30
+                    else:
+                        edge_y = bottom_y - 30
+                    edge_x = center_x + dx * 50
+                    edge_x = max(left_x, min(right_x, edge_x))
+
+                # Draw ship at edge with "leaving" indicator
+                self._draw_edge_ship(screen, int(edge_x), int(edge_y), ship_color, entering=False)
+
+    def _draw_edge_ship(
+        self,
+        screen: pygame.Surface,
+        x: int,
+        y: int,
+        color: tuple[int, int, int],
+        entering: bool
+    ) -> None:
+        """Draw a ship indicator at the screen edge.
+
+        Args:
+            screen: Surface to draw on
+            x, y: Screen position
+            color: Ship color
+            entering: True if ship is entering sector, False if leaving
+        """
+        # Draw small triangle indicator
+        size = 6
+        if entering:
+            # Arrow pointing inward (toward center)
+            # Approximate angle toward screen center
+            cx = self.screen_width // 2
+            cy = self.screen_height // 2
+            angle = math.atan2(cy - y, cx - x)
+        else:
+            # Arrow pointing outward (away from center)
+            cx = self.screen_width // 2
+            cy = self.screen_height // 2
+            angle = math.atan2(y - cy, x - cx)
+
+        # Triangle points
+        points = [
+            (x + size * math.cos(angle), y + size * math.sin(angle)),
+            (x + size * math.cos(angle + 2.5), y + size * math.sin(angle + 2.5)),
+            (x + size * math.cos(angle - 2.5), y + size * math.sin(angle - 2.5)),
+        ]
+
+        # Draw with slight transparency effect
+        dim_color = (color[0] * 3 // 4, color[1] * 3 // 4, color[2] * 3 // 4)
+        pygame.draw.polygon(screen, dim_color, points)
+
+        # Draw direction indicator line
+        line_len = 12 if entering else 8
+        end_x = x + line_len * math.cos(angle)
+        end_y = y + line_len * math.sin(angle)
+        pygame.draw.line(screen, dim_color, (x, y), (int(end_x), int(end_y)), 1)
 
     def _render_title(self, screen: pygame.Surface) -> None:
         """Render sector title."""

@@ -91,10 +91,22 @@ class TradingBehavior(ShipBehavior):
                 # Navigate to source
                 return self._navigate_to_station(ctx, route[0])
             else:
-                # No profitable routes - wait and try again
+                # No profitable routes - switch to patrol behavior for activity
+                # This creates constant motion even when economy is balanced
+                patrol_target = self._find_patrol_target(ctx)
+                if patrol_target:
+                    return BehaviorResult(
+                        status=BehaviorStatus.RUNNING,
+                        target_x=patrol_target[0],
+                        target_y=patrol_target[1],
+                        target_body=patrol_target[2],
+                        wait_time=1.0,
+                        message="Patrolling while seeking trades"
+                    )
+                # Fall back to short wait if no patrol target
                 return BehaviorResult(
                     status=BehaviorStatus.WAITING,
-                    wait_time=5.0,
+                    wait_time=2.0,
                     message="No profitable routes found"
                 )
 
@@ -330,6 +342,47 @@ class TradingBehavior(ShipBehavior):
         dest_market.credits -= total_value
 
         return True
+
+    def _find_patrol_target(self, ctx: BehaviorContext) -> tuple | None:
+        """Find a nearby station to patrol to while waiting for trade opportunities.
+
+        Returns: (target_x, target_y, target_body) or None
+        """
+        import random
+        from ...entities.stations import Station
+        from ...solar_system.orbits import Position
+
+        em = ctx.entity_manager
+        nearby_stations = []
+
+        for entity, station in em.get_all_components(Station):
+            pos = em.get_component(entity, Position)
+            if not pos:
+                continue
+
+            dist = ctx.position.distance_to(pos)
+            if dist > 2.0:  # Within 2 AU
+                continue
+
+            nearby_stations.append((pos.x, pos.y, station.parent_body, dist))
+
+        if not nearby_stations:
+            return None
+
+        # Pick a random station that's not the current location
+        nearby_stations.sort(key=lambda x: x[3])
+
+        # Skip current location if there are other options
+        if nearby_stations[0][3] < 0.05 and len(nearby_stations) > 1:
+            candidates = nearby_stations[1:min(5, len(nearby_stations))]
+        else:
+            candidates = nearby_stations[:min(5, len(nearby_stations))]
+
+        if candidates:
+            choice = random.choice(candidates)
+            return (choice[0], choice[1], choice[2])
+
+        return None
 
     def get_priority(self, ctx: BehaviorContext) -> float:
         """Trading has medium priority."""

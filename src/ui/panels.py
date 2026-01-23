@@ -1734,10 +1734,10 @@ class TradeRouteManagerPanel(Panel):
                 surface.blit(msg_surf, (self.x + 10, y))
                 y += line_height + 5
 
-                hint = font.render("Press T + click second station", True, COLORS['ui_highlight'])
+                hint = font.render("Click second station to complete", True, COLORS['ui_highlight'])
                 surface.blit(hint, (self.x + 10, y))
             else:
-                hint = font.render("Press T + click first station", True, COLORS['ui_highlight'])
+                hint = font.render("Click a station in sector view", True, COLORS['ui_highlight'])
                 surface.blit(hint, (self.x + 10, y))
 
             y += line_height + 10
@@ -2323,38 +2323,50 @@ class StoryEventPanel:
 
 
 class ShipsListPanel:
-    """Fleet panel showing all player ships with their status."""
+    """Fleet panel showing all player ships with their status.
 
-    def __init__(self, x: int, y: int, width: int = 350, height: int = 400) -> None:
-        self.x = x
-        self.y = y
+    Large centered panel with full ship details including routes, cargo, and destinations.
+    """
+
+    def __init__(self, x: int, y: int, width: int = 700, height: int = 500) -> None:
+        self.base_x = x  # Will be recalculated for centering
+        self.base_y = y
         self.width = width
         self.height = height
         self.visible = False
-        self.bg_color = (20, 25, 35, 240)
+        self.bg_color = (15, 20, 30, 245)
         self.border_color = (80, 100, 140)
 
         # Ship list
         self.ships: list[dict] = []  # List of ship info dicts
         self.selected_index: int = -1
         self.scroll_offset: int = 0
+        self.max_visible = 8  # Ships visible at once
 
         # Player faction ID
         self.player_faction_id: UUID | None = None
+
+        # Screen size for centering
+        self.screen_width = 1280
+        self.screen_height = 720
+
+    def set_screen_size(self, width: int, height: int) -> None:
+        """Update screen size for centering."""
+        self.screen_width = width
+        self.screen_height = height
+
+    def get_centered_position(self) -> tuple[int, int]:
+        """Get centered position for the panel."""
+        x = (self.screen_width - self.width) // 2
+        y = (self.screen_height - self.height) // 2
+        return x, y
 
     def set_player_faction(self, faction_id: UUID | None) -> None:
         """Set the player faction ID for filtering ships."""
         self.player_faction_id = faction_id
 
     def select_ship(self, index: int) -> UUID | None:
-        """Select a ship by index.
-
-        Args:
-            index: 0-based index in visible list (use 1-9 for keys)
-
-        Returns:
-            Ship ID if valid selection, None otherwise
-        """
+        """Select a ship by index."""
         adjusted_index = self.scroll_offset + index
         if 0 <= adjusted_index < len(self.ships):
             self.selected_index = adjusted_index
@@ -2373,21 +2385,29 @@ class ShipsListPanel:
 
     def scroll_down(self) -> None:
         """Scroll the ship list down."""
-        max_scroll = max(0, len(self.ships) - 9)  # Show 9 ships at a time
+        max_scroll = max(0, len(self.ships) - self.max_visible)
         self.scroll_offset = min(max_scroll, self.scroll_offset + 1)
 
     def update_ships(self, world: "World") -> None:
-        """Update the ships list from the world."""
-        from ..entities.ships import Ship
+        """Update the ships list from the world with detailed info."""
+        from ..entities.ships import Ship, ShipType
         from ..entities.stations import Station
         from ..solar_system.orbits import Position, NavigationTarget, ParentBody
-        from ..simulation.trade import Trader, TradeState, ManualRoute
+        from ..simulation.trade import Trader, TradeState, ManualRoute, CargoHold
 
         if not self.player_faction_id:
             self.ships = []
             return
 
         em = world.entity_manager
+
+        # Build station lookup for faster searching
+        station_positions: dict[str, tuple[float, float, str]] = {}
+        for station_entity, station in em.get_all_components(Station):
+            station_pos = em.get_component(station_entity, Position)
+            if station_pos:
+                station_positions[station_entity.id] = (station_pos.x, station_pos.y, station_entity.name)
+
         self.ships = []
 
         for entity, ship in em.get_all_components(Ship):
@@ -2399,60 +2419,102 @@ class ShipsListPanel:
             trader = em.get_component(entity, Trader)
             manual_route = em.get_component(entity, ManualRoute)
             parent = em.get_component(entity, ParentBody)
+            cargo = em.get_component(entity, CargoHold)
 
-            # Determine status
+            # Determine status and details
             status = "Idle"
-            location = "Unknown"
-            destination = None
+            status_detail = ""
+            location = "Deep Space"
+            destination = ""
+            route_info = ""
+            cargo_info = "Empty"
 
-            if pos:
-                # Find current location (nearest body/station)
-                if parent:
-                    location = parent.parent_name
-                else:
-                    # Check for nearby stations
-                    for station_entity, station in em.get_all_components(Station):
-                        station_pos = em.get_component(station_entity, Position)
-                        if station_pos:
-                            dist = ((pos.x - station_pos.x)**2 + (pos.y - station_pos.y)**2)**0.5
-                            if dist < 0.1:
-                                location = station_entity.name
-                                break
+            # Location
+            if parent:
+                location = parent.parent_name
+            elif pos:
+                # Find nearest station
+                for sid, (sx, sy, sname) in station_positions.items():
+                    dist = ((pos.x - sx)**2 + (pos.y - sy)**2)**0.5
+                    if dist < 0.1:
+                        location = sname
+                        break
 
+            # Destination
             if nav and (nav.target_x != 0 or nav.target_y != 0):
-                # Ship is traveling
                 if nav.current_speed > 0.01:
-                    status = "Traveling"
-                    # Find destination name
-                    for station_entity, _ in em.get_all_components(Station):
-                        station_pos = em.get_component(station_entity, Position)
-                        if station_pos:
-                            dist = ((nav.target_x - station_pos.x)**2 + (nav.target_y - station_pos.y)**2)**0.5
-                            if dist < 0.1:
-                                destination = station_entity.name
-                                break
+                    status = "In Transit"
+                    # Find destination
+                    for sid, (sx, sy, sname) in station_positions.items():
+                        dist = ((nav.target_x - sx)**2 + (nav.target_y - sy)**2)**0.5
+                        if dist < 0.1:
+                            destination = sname
+                            break
                     if not destination and nav.target_body_name:
                         destination = nav.target_body_name
 
+            # Route info
             if manual_route and manual_route.waypoints:
-                status = "Trading (Route)"
+                status = "On Route"
+                wp_names = [wp.station_name for wp in manual_route.waypoints[:3]]
+                if len(manual_route.waypoints) > 3:
+                    route_info = " → ".join(wp_names) + f" (+{len(manual_route.waypoints) - 3})"
+                else:
+                    route_info = " → ".join(wp_names)
+                # Current waypoint
+                current_wp = manual_route.get_current_waypoint()
+                if current_wp:
+                    status_detail = f"→ {current_wp.station_name}"
             elif trader:
                 if trader.state == TradeState.TRAVELING_TO_BUY:
-                    status = "Trading (Buy)"
+                    status = "Trading"
+                    status_detail = "Going to buy"
                 elif trader.state == TradeState.TRAVELING_TO_SELL:
-                    status = "Trading (Sell)"
+                    status = "Trading"
+                    status_detail = "Going to sell"
                 elif trader.state == TradeState.BUYING:
-                    status = "Buying"
+                    status = "At Station"
+                    status_detail = "Buying cargo"
                 elif trader.state == TradeState.SELLING:
-                    status = "Selling"
+                    status = "At Station"
+                    status_detail = "Selling cargo"
+
+            # Cargo info
+            if cargo:
+                total_cargo = sum(cargo.cargo.values())
+                if total_cargo > 0:
+                    cargo_items = []
+                    for res, amt in sorted(cargo.cargo.items(), key=lambda x: -x[1]):
+                        if amt > 0:
+                            res_name = res.value.replace("_", " ").title()[:12]
+                            cargo_items.append(f"{res_name}: {int(amt)}")
+                    cargo_info = ", ".join(cargo_items[:2])
+                    if len(cargo_items) > 2:
+                        cargo_info += f" (+{len(cargo_items) - 2})"
+                    cargo_info = f"{int(total_cargo)}/{int(cargo.capacity)} - {cargo_info}"
+                else:
+                    cargo_info = f"0/{int(cargo.capacity)} - Empty"
+
+            # Ship type display
+            type_names = {
+                ShipType.SHUTTLE: "Shuttle",
+                ShipType.FREIGHTER: "Freighter",
+                ShipType.BULK_HAULER: "Bulk Hauler",
+                ShipType.TANKER: "Tanker",
+                ShipType.DRONE: "Drone",
+            }
+            ship_type = type_names.get(ship.ship_type, ship.ship_type.value)
 
             ship_info = {
                 'id': entity.id,
                 'name': entity.name,
-                'type': ship.ship_type.value,
+                'type': ship_type,
                 'status': status,
+                'status_detail': status_detail,
                 'location': location,
                 'destination': destination,
+                'route_info': route_info,
+                'cargo_info': cargo_info,
             }
             self.ships.append(ship_info)
 
@@ -2464,123 +2526,456 @@ class ShipsListPanel:
             self.selected_index = len(self.ships) - 1 if self.ships else -1
 
     def render(self, surface: pygame.Surface, font: pygame.font.Font) -> None:
-        """Render the ships list panel."""
+        """Render the ships list panel - large centered view."""
         if not self.visible:
             return
 
-        # Background with transparency
+        # Get centered position
+        x, y = self.get_centered_position()
+
+        # Semi-transparent overlay behind panel
+        overlay = pygame.Surface((self.screen_width, self.screen_height), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 150))
+        surface.blit(overlay, (0, 0))
+
+        # Background
         panel_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
         panel_surf.fill(self.bg_color)
-        surface.blit(panel_surf, (self.x, self.y))
+        surface.blit(panel_surf, (x, y))
 
         # Border
-        pygame.draw.rect(surface, self.border_color, (self.x, self.y, self.width, self.height), 2)
+        pygame.draw.rect(surface, self.border_color, (x, y, self.width, self.height), 2)
 
         # Title
-        title_font = pygame.font.Font(None, 24)
-        title = title_font.render("FLEET [F]", True, (200, 220, 255))
-        surface.blit(title, (self.x + 10, self.y + 8))
+        title_font = pygame.font.Font(None, 32)
+        title = title_font.render("FLEET OVERVIEW", True, (200, 220, 255))
+        surface.blit(title, (x + 20, y + 15))
 
         # Ship count
         count_text = f"{len(self.ships)} ships"
         count_surf = font.render(count_text, True, (150, 150, 150))
-        surface.blit(count_surf, (self.x + self.width - count_surf.get_width() - 15, self.y + 12))
+        surface.blit(count_surf, (x + self.width - count_surf.get_width() - 20, y + 20))
+
+        # Close hint
+        close_hint = font.render("Press F or Escape to close", True, (100, 100, 120))
+        surface.blit(close_hint, (x + self.width - close_hint.get_width() - 20, y + 38))
 
         # Separator
-        pygame.draw.line(surface, self.border_color, (self.x + 5, self.y + 35), (self.x + self.width - 5, self.y + 35), 1)
+        pygame.draw.line(surface, self.border_color, (x + 10, y + 55), (x + self.width - 10, y + 55), 1)
 
-        current_y = self.y + 42
-        line_height = 22
+        current_y = y + 65
+        row_height = 52  # Taller rows for two lines of info
 
         if not self.ships:
-            no_ships = font.render("No ships in fleet", True, (100, 100, 100))
-            surface.blit(no_ships, (self.x + 20, current_y + 20))
+            no_ships_font = pygame.font.Font(None, 24)
+            no_ships = no_ships_font.render("No ships in your fleet", True, (100, 100, 100))
+            surface.blit(no_ships, (x + self.width // 2 - no_ships.get_width() // 2, y + 150))
             return
 
         # Column headers
-        header_color = (120, 140, 180)
-        headers = ["#", "Name", "Status", "Location"]
-        col_widths = [25, 130, 90, 90]
-        col_x = self.x + 10
-        for header, width in zip(headers, col_widths):
-            header_surf = font.render(header, True, header_color)
+        header_font = pygame.font.Font(None, 20)
+        header_color = (100, 120, 160)
+
+        headers = [
+            ("#", 30),
+            ("Ship Name", 180),
+            ("Status", 140),
+            ("Location / Destination", 180),
+            ("Cargo", 150),
+        ]
+
+        col_x = x + 15
+        for header_text, width in headers:
+            header_surf = header_font.render(header_text, True, header_color)
             surface.blit(header_surf, (col_x, current_y))
             col_x += width
-        current_y += line_height
+        current_y += 22
 
         # Separator after headers
-        pygame.draw.line(surface, (50, 60, 80), (self.x + 5, current_y - 4), (self.x + self.width - 5, current_y - 4), 1)
+        pygame.draw.line(surface, (40, 50, 70), (x + 10, current_y), (x + self.width - 10, current_y), 1)
+        current_y += 8
 
-        # Ship list (show 9 at a time for 1-9 keys)
-        visible_ships = self.ships[self.scroll_offset:self.scroll_offset + 9]
+        # Ship list
+        visible_ships = self.ships[self.scroll_offset:self.scroll_offset + self.max_visible]
+        name_font = pygame.font.Font(None, 22)
+        detail_font = pygame.font.Font(None, 18)
 
         for i, ship in enumerate(visible_ships):
             actual_index = self.scroll_offset + i
             is_selected = actual_index == self.selected_index
 
-            # Selection highlight
+            # Row background
+            row_color = (40, 50, 70) if is_selected else (25, 30, 45) if i % 2 == 0 else (20, 25, 35)
+            pygame.draw.rect(surface, row_color, (x + 5, current_y - 2, self.width - 10, row_height - 4))
+
+            # Selection indicator
             if is_selected:
-                pygame.draw.rect(
-                    surface, (50, 60, 90),
-                    (self.x + 5, current_y - 2, self.width - 10, line_height)
-                )
+                pygame.draw.rect(surface, (80, 120, 180), (x + 5, current_y - 2, 3, row_height - 4))
 
-            # Determine colors based on status
+            # Status-based accent color
             if ship['status'] == 'Idle':
-                status_color = (150, 150, 150)
-            elif 'Trading' in ship['status']:
-                status_color = (100, 200, 100)
-            elif ship['status'] == 'Traveling':
-                status_color = (100, 150, 255)
+                accent_color = (120, 120, 120)
+            elif ship['status'] in ('On Route', 'Trading'):
+                accent_color = (80, 200, 100)
+            elif ship['status'] == 'In Transit':
+                accent_color = (100, 150, 255)
+            elif ship['status'] == 'At Station':
+                accent_color = (200, 200, 100)
             else:
-                status_color = (200, 200, 100)
+                accent_color = (180, 180, 180)
 
-            text_color = (255, 255, 255) if is_selected else (200, 200, 200)
+            col_x = x + 15
 
-            # Number key
-            col_x = self.x + 10
-            num_surf = font.render(f"{i + 1}", True, (150, 150, 200))
-            surface.blit(num_surf, (col_x, current_y))
-            col_x += col_widths[0]
+            # Number
+            num_surf = name_font.render(f"{i + 1}", True, (150, 150, 200))
+            surface.blit(num_surf, (col_x + 5, current_y + 8))
+            col_x += 30
 
-            # Ship name (truncated)
-            name = ship['name'][:16]
-            name_surf = font.render(name, True, text_color)
-            surface.blit(name_surf, (col_x, current_y))
-            col_x += col_widths[1]
+            # Ship name and type
+            name_surf = name_font.render(ship['name'][:25], True, (240, 240, 255))
+            surface.blit(name_surf, (col_x, current_y + 2))
+            type_surf = detail_font.render(ship['type'], True, (120, 130, 150))
+            surface.blit(type_surf, (col_x, current_y + 22))
+            col_x += 180
 
             # Status
-            status_surf = font.render(ship['status'][:12], True, status_color)
-            surface.blit(status_surf, (col_x, current_y))
-            col_x += col_widths[2]
+            status_surf = name_font.render(ship['status'], True, accent_color)
+            surface.blit(status_surf, (col_x, current_y + 2))
+            if ship['status_detail']:
+                detail_surf = detail_font.render(ship['status_detail'][:20], True, (140, 150, 170))
+                surface.blit(detail_surf, (col_x, current_y + 22))
+            elif ship['route_info']:
+                route_surf = detail_font.render(ship['route_info'][:22], True, (100, 180, 100))
+                surface.blit(route_surf, (col_x, current_y + 22))
+            col_x += 140
 
-            # Location
-            loc = ship['location'][:12] if ship['location'] else "-"
-            loc_surf = font.render(loc, True, (150, 150, 150))
-            surface.blit(loc_surf, (col_x, current_y))
+            # Location / Destination
+            loc_surf = name_font.render(ship['location'][:22], True, (180, 180, 200))
+            surface.blit(loc_surf, (col_x, current_y + 2))
+            if ship['destination']:
+                dest_surf = detail_font.render(f"→ {ship['destination'][:18]}", True, (100, 150, 255))
+                surface.blit(dest_surf, (col_x, current_y + 22))
+            col_x += 180
 
-            current_y += line_height
+            # Cargo
+            cargo_color = (150, 150, 150) if "Empty" in ship['cargo_info'] else (180, 200, 180)
+            cargo_surf = detail_font.render(ship['cargo_info'][:22], True, cargo_color)
+            surface.blit(cargo_surf, (col_x, current_y + 12))
+
+            current_y += row_height
 
         # Scroll indicators
         if self.scroll_offset > 0:
-            up_arrow = font.render("▲ More above", True, (100, 100, 100))
-            surface.blit(up_arrow, (self.x + self.width // 2 - 40, self.y + 40))
+            up_text = f"▲ {self.scroll_offset} more above"
+            up_surf = font.render(up_text, True, (100, 120, 150))
+            surface.blit(up_surf, (x + self.width // 2 - up_surf.get_width() // 2, y + 60))
 
-        if self.scroll_offset + 9 < len(self.ships):
-            down_arrow = font.render("▼ More below", True, (100, 100, 100))
-            surface.blit(down_arrow, (self.x + self.width // 2 - 40, self.y + self.height - 60))
+        if self.scroll_offset + self.max_visible < len(self.ships):
+            remaining = len(self.ships) - self.scroll_offset - self.max_visible
+            down_text = f"▼ {remaining} more below"
+            down_surf = font.render(down_text, True, (100, 120, 150))
+            surface.blit(down_surf, (x + self.width // 2 - down_surf.get_width() // 2, y + self.height - 70))
 
         # Controls footer
-        footer_y = self.y + self.height - 45
-        pygame.draw.line(surface, self.border_color, (self.x + 5, footer_y - 5), (self.x + self.width - 5, footer_y - 5), 1)
+        footer_y = y + self.height - 50
+        pygame.draw.line(surface, self.border_color, (x + 10, footer_y), (x + self.width - 10, footer_y), 1)
 
         controls = [
-            "1-9: Select ship",
-            "Enter: Follow ship",
-            "W: Set waypoint",
+            ("1-9", "Select ship"),
+            ("↑/↓", "Scroll"),
+            ("Enter", "Follow selected"),
+            ("W", "Set waypoint"),
+            ("T", "Trade routes"),
         ]
-        ctrl_y = footer_y
-        for ctrl in controls:
-            ctrl_surf = font.render(ctrl, True, (120, 120, 140))
-            surface.blit(ctrl_surf, (self.x + 10, ctrl_y))
-            ctrl_y += 14
+
+        ctrl_x = x + 20
+        for key, desc in controls:
+            key_surf = font.render(key, True, (150, 180, 220))
+            surface.blit(key_surf, (ctrl_x, footer_y + 15))
+            desc_surf = font.render(desc, True, (120, 120, 140))
+            surface.blit(desc_surf, (ctrl_x + key_surf.get_width() + 5, footer_y + 15))
+            ctrl_x += key_surf.get_width() + desc_surf.get_width() + 25
+
+
+@dataclass
+class SectorEconomyPanel(Panel):
+    """Panel showing player's assets in the current sector.
+
+    Shows only player-owned stations, their inventory, and credits.
+    Includes minimum reserve controls to prevent auto-selling.
+    Positioned on the left side of the screen.
+    """
+    sector_id: str = ""
+    player_faction_id: UUID | None = None
+    player_stations: list[dict] = field(default_factory=list)  # Station info dicts
+    total_inventory: dict[str, float] = field(default_factory=dict)  # Resource totals
+    total_credits: float = 0.0
+    faction_credits: float = 0.0  # Player's faction credits
+
+    # Reserve control
+    min_reserve_level: int = 0  # Global minimum reserve for all resources
+    reserve_levels: list[int] = field(default_factory=lambda: [0, 25, 50, 100, 200])
+    reserve_button_rect: tuple[int, int, int, int] = (0, 0, 0, 0)
+    _world_ref: object = None  # Store world reference for applying reserves
+    _station_entities: list = field(default_factory=list)  # Store entity refs
+
+    def __init__(self, x: int, y: int) -> None:
+        super().__init__(
+            x=x, y=y, width=240, height=400, title="YOUR ASSETS"
+        )
+        self.visible = True
+        self.sector_id = ""
+        self.player_faction_id = None
+        self.player_stations = []
+        self.total_inventory = {}
+        self.total_credits = 0.0
+        self.faction_credits = 0.0
+        self.min_reserve_level = 0
+        self.reserve_levels = [0, 25, 50, 100, 200]
+        self.reserve_button_rect = (0, 0, 0, 0)
+        self._world_ref = None
+        self._station_entities = []
+
+    def set_player_faction(self, faction_id: UUID | None) -> None:
+        """Set the player faction for filtering."""
+        self.player_faction_id = faction_id
+
+    def handle_click(self, x: int, y: int) -> bool:
+        """Handle mouse click. Returns True if click was handled."""
+        bx, by, bw, bh = self.reserve_button_rect
+        if bx <= x <= bx + bw and by <= y <= by + bh:
+            self._cycle_reserve_level()
+            return True
+        return False
+
+    def _cycle_reserve_level(self) -> None:
+        """Cycle through reserve levels and apply to all player stations."""
+        current_idx = self.reserve_levels.index(self.min_reserve_level) if self.min_reserve_level in self.reserve_levels else 0
+        next_idx = (current_idx + 1) % len(self.reserve_levels)
+        self.min_reserve_level = self.reserve_levels[next_idx]
+        self._apply_reserves_to_stations()
+
+    def _apply_reserves_to_stations(self) -> None:
+        """Apply current reserve level to all player stations."""
+        if not self._world_ref or not self._station_entities:
+            return
+
+        from ..entities.stations import Station
+        from ..simulation.resources import Inventory, ResourceType
+
+        em = self._world_ref.entity_manager
+
+        for entity in self._station_entities:
+            station = em.get_component(entity, Station)
+            inv = em.get_component(entity, Inventory)
+            if not station or not inv:
+                continue
+
+            # Set reserve for all resources in inventory
+            for resource in inv.resources.keys():
+                station.set_min_reserve(resource, float(self.min_reserve_level))
+
+    def update_sector_data(self, world: "World", sector_id: str) -> None:
+        """Update player's asset data for the given sector.
+
+        Args:
+            world: The game world
+            sector_id: ID of the sector to analyze
+        """
+        from ..entities.stations import Station
+        from ..entities.factions import Faction
+        from ..simulation.economy import Market
+        from ..simulation.resources import Inventory
+        from ..solar_system.sectors import SECTORS
+
+        if sector_id not in SECTORS:
+            return
+
+        self.sector_id = sector_id
+        sector = SECTORS[sector_id]
+        self._world_ref = world  # Store for reserve updates
+
+        # Get all bodies in this sector
+        sector_bodies = {body.name for body in sector.bodies}
+
+        em = world.entity_manager
+
+        # Clear previous data
+        self.player_stations = []
+        self.total_inventory = {}
+        self.total_credits = 0.0
+        self._station_entities = []  # Clear station refs
+
+        # Get player faction credits
+        if self.player_faction_id:
+            for entity, faction in em.get_all_components(Faction):
+                if entity.id == self.player_faction_id:
+                    self.faction_credits = faction.credits
+                    break
+
+        # Collect data from player-owned stations in this sector
+        for entity, station in em.get_all_components(Station):
+            # Check if station is in this sector
+            if station.parent_body not in sector_bodies:
+                continue
+
+            # Only include player-owned stations
+            if station.owner_faction_id != self.player_faction_id:
+                continue
+
+            # Store entity reference for reserve updates
+            self._station_entities.append(entity)
+
+            # Get station details
+            market = em.get_component(entity, Market)
+            inv = em.get_component(entity, Inventory)
+
+            station_info = {
+                'name': entity.name,
+                'type': station.station_type.value.replace("_", " ").title(),
+                'credits': market.credits if market else 0,
+                'inventory': {},
+            }
+
+            if market:
+                self.total_credits += market.credits
+
+            # Collect inventory
+            if inv:
+                for resource, amount in inv.resources.items():
+                    if amount > 0:
+                        resource_name = resource.value.replace("_", " ").title()
+                        station_info['inventory'][resource_name] = amount
+                        # Add to totals
+                        if resource_name not in self.total_inventory:
+                            self.total_inventory[resource_name] = 0
+                        self.total_inventory[resource_name] += amount
+
+            self.player_stations.append(station_info)
+
+        # Sort stations by name
+        self.player_stations.sort(key=lambda s: s['name'])
+
+    def draw(self, surface: pygame.Surface, font: pygame.font.Font) -> None:
+        """Draw the player assets panel."""
+        if not self.visible:
+            return
+
+        # Calculate height based on content
+        content_height = 60  # Header + faction credits
+        content_height += len(self.player_stations) * 60  # Per station
+        content_height += min(6, len(self.total_inventory)) * 16 + 30  # Inventory totals
+        content_height += 60  # Reserve control section
+        self.height = max(300, min(550, content_height + 40))
+
+        # Draw background and border
+        super().draw(surface, font)
+
+        line_height = font.get_linesize()
+        y = self.y + 28
+
+        # Player faction credits
+        credits_label = font.render("Your Credits:", True, (150, 150, 170))
+        surface.blit(credits_label, (self.x + 10, y))
+        credits_value = font.render(f"${self.faction_credits:,.0f}", True, (255, 215, 100))
+        surface.blit(credits_value, (self.x + self.width - credits_value.get_width() - 15, y))
+        y += line_height + 5
+
+        # Separator
+        pygame.draw.line(surface, self.border_color, (self.x + 5, y), (self.x + self.width - 5, y), 1)
+        y += 8
+
+        # Stations section
+        if not self.player_stations:
+            no_stations = font.render("No stations in sector", True, (100, 100, 100))
+            surface.blit(no_stations, (self.x + 10, y))
+            y += line_height
+        else:
+            stations_header = font.render(f"STATIONS ({len(self.player_stations)}):", True, (100, 180, 255))
+            surface.blit(stations_header, (self.x + 10, y))
+            y += line_height + 2
+
+            for station in self.player_stations[:4]:  # Show up to 4 stations
+                # Station name
+                name_surf = font.render(station['name'][:28], True, (200, 200, 220))
+                surface.blit(name_surf, (self.x + 15, y))
+                y += line_height - 2
+
+                # Station credits
+                credits_text = f"  ${station['credits']:,.0f}"
+                credits_surf = font.render(credits_text, True, (180, 180, 100))
+                surface.blit(credits_surf, (self.x + 15, y))
+
+                # Top inventory item
+                if station['inventory']:
+                    top_item = max(station['inventory'].items(), key=lambda x: x[1])
+                    inv_text = f"  {top_item[0][:10]}: {int(top_item[1])}"
+                    inv_surf = font.render(inv_text, True, (150, 180, 150))
+                    surface.blit(inv_surf, (self.x + 100, y))
+                y += line_height + 4
+
+        y += 5
+
+        # Separator
+        pygame.draw.line(surface, self.border_color, (self.x + 5, y), (self.x + self.width - 5, y), 1)
+        y += 8
+
+        # Inventory totals
+        inv_header = font.render("TOTAL INVENTORY:", True, (100, 200, 100))
+        surface.blit(inv_header, (self.x + 10, y))
+        y += line_height
+
+        if self.total_inventory:
+            # Sort by amount descending
+            sorted_inv = sorted(self.total_inventory.items(), key=lambda x: -x[1])
+            for resource_name, amount in sorted_inv[:6]:
+                inv_text = f"  {resource_name[:14]:<14} {int(amount):>6}"
+                inv_surf = font.render(inv_text, True, (180, 200, 180))
+                surface.blit(inv_surf, (self.x + 10, y))
+                y += line_height - 2
+        else:
+            none_text = "  (none)"
+            none_surf = font.render(none_text, True, (100, 100, 100))
+            surface.blit(none_surf, (self.x + 10, y))
+            y += line_height
+
+        y += 10
+
+        # Reserve control section
+        pygame.draw.line(surface, self.border_color, (self.x + 5, y), (self.x + self.width - 5, y), 1)
+        y += 8
+
+        reserve_label = font.render("MIN RESERVE:", True, (200, 150, 100))
+        surface.blit(reserve_label, (self.x + 10, y))
+
+        # Reserve button
+        btn_x = self.x + 110
+        btn_y = y - 2
+        btn_w = 60
+        btn_h = line_height + 4
+        self.reserve_button_rect = (btn_x, btn_y, btn_w, btn_h)
+
+        # Draw button background
+        btn_color = (60, 80, 60) if self.min_reserve_level > 0 else (50, 50, 60)
+        pygame.draw.rect(surface, btn_color, (btn_x, btn_y, btn_w, btn_h))
+        pygame.draw.rect(surface, (100, 120, 100), (btn_x, btn_y, btn_w, btn_h), 1)
+
+        # Button text
+        reserve_text = f"{self.min_reserve_level}" if self.min_reserve_level > 0 else "OFF"
+        reserve_surf = font.render(reserve_text, True, (220, 220, 180))
+        text_x = btn_x + (btn_w - reserve_surf.get_width()) // 2
+        text_y = btn_y + (btn_h - reserve_surf.get_height()) // 2
+        surface.blit(reserve_surf, (text_x, text_y))
+
+        y += line_height + 8
+
+        # Help text
+        help_text = "(Click to change)"
+        help_surf = font.render(help_text, True, (100, 100, 110))
+        surface.blit(help_surf, (self.x + 10, y))
+
+        # Station credits total at bottom
+        y = self.y + self.height - 25
+        total_text = f"Station Credits: ${self.total_credits:,.0f}"
+        total_surf = font.render(total_text, True, (200, 200, 150))
+        surface.blit(total_surf, (self.x + 10, y))

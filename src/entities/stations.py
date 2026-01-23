@@ -37,6 +37,22 @@ class Station(Component):
     max_population: int = 100
     morale: float = 1.0  # 0-1, affects productivity
 
+    # Minimum inventory reserves - prevents auto-trading below these levels
+    # Key: ResourceType, Value: minimum amount to keep
+    min_reserves: dict = field(default_factory=dict)
+
+    def get_available_for_trade(self, resource: ResourceType, current_amount: float) -> float:
+        """Get amount available for auto-trading (respects min_reserves)."""
+        min_keep = self.min_reserves.get(resource, 0.0)
+        return max(0.0, current_amount - min_keep)
+
+    def set_min_reserve(self, resource: ResourceType, amount: float) -> None:
+        """Set minimum reserve for a resource."""
+        if amount > 0:
+            self.min_reserves[resource] = amount
+        elif resource in self.min_reserves:
+            del self.min_reserves[resource]
+
 
 # Station type configurations
 STATION_CONFIGS: dict[StationType, dict] = {

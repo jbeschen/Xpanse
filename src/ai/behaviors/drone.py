@@ -30,8 +30,9 @@ class DroneBehavior(ShipBehavior):
     """
 
     def __init__(self) -> None:
-        self.patrol_radius = 0.05  # AU
+        self.patrol_radius = 0.02  # AU (reduced from 0.05 - keeps drones visible near home)
         self.max_pickup_distance = 0.1  # AU - max distance for pickups
+        self.supply_check_threshold = 15  # Check stations below this stock level
 
     @property
     def name(self) -> str:
@@ -80,8 +81,12 @@ class DroneBehavior(ShipBehavior):
                 ctx.state_data["drone_state"] = DroneState.TRAVELING_TO_DELIVER
                 return self._navigate_to_station(ctx, home_station_id)
 
-            # Look for resources to pick up
+            # Look for resources to pick up (including proactive supply checks)
             pickup = self._find_pickup_target(ctx, home_station)
+            if not pickup:
+                # Proactive: check if any nearby station needs supplies
+                pickup = self._find_low_stock_station(ctx, home_station)
+
             if pickup:
                 station_id, resource = pickup
                 ctx.state_data["pickup_station_id"] = station_id
@@ -89,7 +94,7 @@ class DroneBehavior(ShipBehavior):
                 ctx.state_data["drone_state"] = DroneState.TRAVELING_TO_PICKUP
                 return self._navigate_to_station(ctx, station_id)
 
-            # Nothing to do - patrol
+            # Nothing to do - patrol (with minimal wait)
             ctx.state_data["drone_state"] = DroneState.PATROLLING
             return self._patrol_around_home(ctx, home_station)
 
@@ -122,12 +127,15 @@ class DroneBehavior(ShipBehavior):
             )
 
         elif state == DroneState.PATROLLING:
-            # Check if patrol complete or if new work available
+            # Check more frequently if new work is available
             pickup = self._find_pickup_target(ctx, home_station)
+            if not pickup:
+                pickup = self._find_low_stock_station(ctx, home_station)
             if pickup:
                 ctx.state_data["drone_state"] = DroneState.IDLE
                 return BehaviorResult(
                     status=BehaviorStatus.RUNNING,
+                    wait_time=0.2,  # Quick transition
                     message="Found pickup target"
                 )
             return BehaviorResult(status=BehaviorStatus.RUNNING)
@@ -161,7 +169,7 @@ class DroneBehavior(ShipBehavior):
                 return self._patrol_around_home(ctx, home_station)
             ctx.state_data["drone_state"] = DroneState.IDLE
 
-        return BehaviorResult(status=BehaviorStatus.RUNNING, wait_time=0.5)
+        return BehaviorResult(status=BehaviorStatus.RUNNING, wait_time=0.2)  # Faster transitions
 
     def _find_pickup_target(self, ctx: BehaviorContext, home_station) -> tuple | None:
         """Find a station with resources needed by home station.
@@ -236,9 +244,74 @@ class DroneBehavior(ShipBehavior):
             return (best_source.id, best_resource)
         return None
 
+    def _find_low_stock_station(self, ctx: BehaviorContext, home_station) -> tuple | None:
+        """Proactively find a nearby station with low stock that needs supplies.
+
+        Returns: (station_id, resource_type) or None
+        """
+        from ...simulation.production import get_station_input_resources
+        from ...simulation.resources import Inventory
+        from ...entities.stations import Station
+        from ...solar_system.orbits import Position
+        from ...solar_system.bodies import SolarSystemData
+
+        em = ctx.entity_manager
+        home_inv = em.get_component(home_station, Inventory)
+
+        if not home_inv:
+            return None
+
+        best_target = None
+        best_dist = float('inf')
+        best_resource = None
+
+        for entity, station in em.get_all_components(Station):
+            if entity.id == home_station.id:
+                continue
+
+            # Only consider stations in same planetary system
+            if ctx.ship.local_system:
+                station_planet = SolarSystemData.get_nearest_planet(station.parent_body)
+                if station_planet != ctx.ship.local_system:
+                    continue
+
+            # Check distance
+            station_pos = em.get_component(entity, Position)
+            if not station_pos:
+                continue
+
+            dist = ctx.position.distance_to(station_pos)
+            if dist > self.max_pickup_distance:
+                continue
+
+            # Check if station has low stock on anything we have
+            station_inv = em.get_component(entity, Inventory)
+            if not station_inv:
+                continue
+
+            # Get what this station needs
+            station_type_str = station.station_type.value
+            needed_inputs = get_station_input_resources(station_type_str)
+
+            for resource in needed_inputs:
+                station_amount = station_inv.get(resource)
+                home_amount = home_inv.get(resource)
+
+                # If station is low and we have some to spare
+                if station_amount < self.supply_check_threshold and home_amount > 10:
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_target = entity
+                        best_resource = resource
+
+        if best_target:
+            return (best_target.id, best_resource)
+        return None
+
     def _execute_pickup(self, ctx: BehaviorContext, cargo) -> bool:
         """Pick up resources from target station."""
         from ...simulation.resources import Inventory
+        from ...entities.stations import Station
 
         station_id = ctx.state_data.get("pickup_station_id")
         resource = ctx.state_data.get("pickup_resource")
@@ -255,6 +328,12 @@ class DroneBehavior(ShipBehavior):
             return False
 
         available = station_inv.get(resource)
+
+        # Respect min_reserves if station has them
+        station_comp = ctx.entity_manager.get_component(station, Station)
+        if station_comp:
+            available = station_comp.get_available_for_trade(resource, available)
+
         space = cargo.free_space
 
         # Take up to half available or fill cargo, max 10 units

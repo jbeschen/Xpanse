@@ -6,11 +6,17 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 from ..core.ecs import Component, System, EntityManager
-from ..core.events import EventBus, PriceChangeEvent
+from ..core.events import EventBus, PriceChangeEvent, DividendEvent
 from .resources import ResourceType, BASE_PRICES, Inventory
 
 if TYPE_CHECKING:
     pass
+
+
+# Dividend system configuration
+DIVIDEND_INTERVAL = 30.0  # Process dividends every 30 seconds of game time
+DIVIDEND_THRESHOLD = 5000.0  # Station keeps this much as operating capital
+DIVIDEND_PERCENTAGE = 0.5  # Transfer 50% of excess credits each interval
 
 
 class MarketType(Enum):
@@ -204,7 +210,7 @@ class PopulationSystem(System):
 
 
 class EconomySystem(System):
-    """System that updates market prices based on supply/demand."""
+    """System that updates market prices and processes station dividends."""
 
     priority = 50  # Run after production and population
 
@@ -212,10 +218,17 @@ class EconomySystem(System):
         self.event_bus = event_bus
         self._update_interval = 5.0  # Update prices every 5 seconds
         self._time_since_update = 0.0
+        self._dividend_timer = 0.0  # Timer for dividend processing
 
     def update(self, dt: float, entity_manager: EntityManager) -> None:
-        """Update market prices."""
+        """Update market prices and process dividends."""
         self._time_since_update += dt
+        self._dividend_timer += dt
+
+        # Process dividends on a separate timer
+        if self._dividend_timer >= DIVIDEND_INTERVAL:
+            self._dividend_timer = 0.0
+            self._process_dividends(entity_manager)
 
         if self._time_since_update < self._update_interval:
             return
@@ -251,6 +264,57 @@ class EconomySystem(System):
                         old_price=old_price,
                         new_price=new_price
                     ))
+
+    def _process_dividends(self, entity_manager: EntityManager) -> None:
+        """Transfer excess credits from owned stations to their owner factions."""
+        from ..entities.stations import Station
+        from ..entities.factions import Faction
+
+        # Build faction lookup
+        factions: dict[UUID, Faction] = {}
+        for entity, faction in entity_manager.get_all_components(Faction):
+            factions[entity.id] = faction
+
+        # Process each station with a market
+        for entity, station in entity_manager.get_all_components(Station):
+            # Skip stations without owners
+            if not station.owner_faction_id:
+                continue
+
+            # Get owner faction
+            owner_faction = factions.get(station.owner_faction_id)
+            if not owner_faction:
+                continue
+
+            # Get station's market
+            market = entity_manager.get_component(entity, Market)
+            if not market:
+                continue
+
+            # Calculate excess credits above operating threshold
+            excess = market.credits - DIVIDEND_THRESHOLD
+            if excess <= 0:
+                continue
+
+            # Transfer percentage of excess to owner
+            dividend = excess * DIVIDEND_PERCENTAGE
+            if dividend < 1.0:  # Skip tiny amounts
+                continue
+
+            # Transfer credits
+            market.credits -= dividend
+            owner_faction.credits += dividend
+
+            # Get station name for event
+            station_name = entity.name or "Station"
+
+            # Fire dividend event
+            self.event_bus.publish(DividendEvent(
+                station_id=entity.id,
+                faction_id=station.owner_faction_id,
+                amount=dividend,
+                station_name=station_name
+            ))
 
 
 def find_best_trade(

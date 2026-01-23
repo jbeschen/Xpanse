@@ -205,35 +205,50 @@ class ShipAISystemV2(System):
     ) -> ShipBehavior | None:
         """Select the best behavior for a ship.
 
-        Checks current behavior first, then falls back based on priority.
+        Priority order:
+        1. ManualRoute (player-assigned trade routes) - HIGHEST
+        2. Drone behavior (for drones with home stations)
+        3. Current behavior (if still valid)
+        4. Trader behavior
+        5. Patrol (default)
         """
-        # If current behavior is valid, use it
-        current = self._behaviors.get(state.behavior_name)
-        if current:
-            ctx = self._create_context(entity_manager, ship_entity, ship, pos, 0.0, state)
-            if current.can_activate(ctx):
-                return current
+        # PRIORITY 1: Check for manual route FIRST - player commands take precedence
+        from ..simulation.trade import ManualRoute
+        route = entity_manager.get_component(ship_entity, ManualRoute)
+        if route and route.waypoints:
+            if state.behavior_name != "waypoint":
+                # Switching to waypoint behavior - reset state
+                state.behavior_name = "waypoint"
+                state.sub_state = "idle"
+                state.state_data = {}
+                state.wait_time = 0.0
+                # Initialize the behavior
+                waypoint_behavior = self._behaviors.get("waypoint")
+                if waypoint_behavior:
+                    ctx = self._create_context(entity_manager, ship_entity, ship, pos, 0.0, state)
+                    waypoint_behavior.on_enter(ctx)
+            return self._behaviors.get("waypoint")
 
-        # Auto-select based on ship type and components
+        # PRIORITY 2: Drones with home stations
         if ship.is_drone and ship.home_station_id:
             state.behavior_name = "drone"
             return self._behaviors.get("drone")
 
-        # Check for manual route
-        from ..simulation.trade import ManualRoute
-        route = entity_manager.get_component(ship_entity, ManualRoute)
-        if route and route.waypoints:
-            state.behavior_name = "waypoint"
-            return self._behaviors.get("waypoint")
+        # PRIORITY 3: If current behavior is valid, use it
+        current = self._behaviors.get(state.behavior_name)
+        if current and state.behavior_name not in ("waypoint",):  # Don't stick to waypoint without route
+            ctx = self._create_context(entity_manager, ship_entity, ship, pos, 0.0, state)
+            if current.can_activate(ctx):
+                return current
 
-        # Check for trader component
+        # PRIORITY 4: Check for trader component
         from ..simulation.trade import Trader
         trader = entity_manager.get_component(ship_entity, Trader)
         if trader:
             state.behavior_name = "trading"
             return self._behaviors.get("trading")
 
-        # Default to patrol
+        # PRIORITY 5: Default to patrol
         state.behavior_name = "patrol"
         return self._behaviors.get("patrol")
 
@@ -325,3 +340,52 @@ class ShipAISystemV2(System):
         """Get current behavior name for a ship."""
         state = self._states.get(ship_id)
         return state.behavior_name if state else "unknown"
+
+    def force_waypoint_behavior(self, entity_manager: EntityManager, ship_id: UUID) -> bool:
+        """Force a ship to immediately start waypoint behavior.
+
+        Called when a manual route is assigned to ensure immediate execution.
+
+        Args:
+            entity_manager: Entity manager
+            ship_id: Ship entity ID
+
+        Returns:
+            True if behavior was activated
+        """
+        ship_entity = entity_manager.get_entity(ship_id)
+        if not ship_entity:
+            return False
+
+        ship = entity_manager.get_component(ship_entity, Ship)
+        pos = entity_manager.get_component(ship_entity, Position)
+        if not ship or not pos:
+            return False
+
+        # Get or create state
+        state = self._get_or_create_state(ship_id)
+
+        # Reset state for waypoint behavior
+        state.behavior_name = "waypoint"
+        state.sub_state = "idle"
+        state.state_data = {}
+        state.wait_time = 0.0
+        state.target_entity_id = None
+
+        # Clear any existing navigation (force re-evaluation)
+        nav = entity_manager.get_component(ship_entity, NavigationTarget)
+        if nav:
+            entity_manager.remove_component(ship_entity, NavigationTarget)
+
+        # Initialize waypoint behavior
+        waypoint_behavior = self._behaviors.get("waypoint")
+        if waypoint_behavior:
+            ctx = self._create_context(entity_manager, ship_entity, ship, pos, 0.0, state)
+            waypoint_behavior.on_enter(ctx)
+
+            # Immediately run first update to start navigation
+            result = waypoint_behavior.update(ctx)
+            self._process_result(entity_manager, ship_entity, ship, state, result)
+            return True
+
+        return False

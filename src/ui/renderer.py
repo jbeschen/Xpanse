@@ -10,11 +10,11 @@ from .camera import Camera
 from .toolbar import Toolbar, ToolbarAction
 from .sector_view import SectorView
 from .panels import (
-    InfoPanel, StatusBar, MiniMap, BuildMenuPanel, PlayerHUD,
+    InfoPanel, StatusBar, BuildMenuPanel, PlayerHUD,
     ShipPurchasePanel, NotificationPanel, PriceHistoryGraph, UpgradePanel,
     TradeRoutePanel, HelpPanel, ContextPrompt, TradeRouteManagerPanel,
     ResourceSelectionPanel, MenuManager, MenuId, NewsFeedPanel, StoryEventPanel,
-    ShipsListPanel
+    ShipsListPanel, SectorEconomyPanel
 )
 from ..entities.stations import StationType
 from ..entities.ships import ShipType
@@ -50,7 +50,6 @@ class Renderer:
             x=10, y=120, width=250, height=200, title="Info"
         )
         self.status_bar = StatusBar(sw, sh)
-        self.minimap = MiniMap(x=sw - 160, y=10, size=150)
         self.build_menu = BuildMenuPanel(x=sw - 300, y=170)
         self.build_menu.visible = False
         self.player_hud = PlayerHUD(x=10, y=10)
@@ -82,6 +81,10 @@ class Renderer:
         # Fleet panel (ships list)
         self.ships_list = ShipsListPanel(x=sw - 370, y=170)
         self.ships_list.visible = False
+
+        # Sector economy panel - shows player assets in sector view (left side)
+        self.sector_economy = SectorEconomyPanel(x=10, y=120)
+        self.sector_economy.visible = False
 
         # Story event panel - campaign events that pause the game
         self.story_event_panel = StoryEventPanel(sw, sh)
@@ -131,6 +134,7 @@ class Renderer:
         self.player_faction_color: tuple[int, int, int] = (255, 255, 255)
         self.building_system: "BuildingSystem | None" = None
         self._world: "World | None" = None
+        self._ship_ai_system = None  # Set via set_ship_ai_system()
 
     def _setup_menu_callbacks(self) -> None:
         """Register close callbacks for all menus."""
@@ -274,6 +278,8 @@ class Renderer:
             self.menu_manager.close_all()
             self.menu_manager.push(MenuId.SHIPS_LIST)
             self.ships_list.visible = True
+            # Set screen size for centering
+            self.ships_list.set_screen_size(self.camera.screen_width, self.camera.screen_height)
             # Update the ship list when opening
             self.ships_list.set_player_faction(self.player_faction_id)
             if self._world:
@@ -327,6 +333,10 @@ class Renderer:
         """Set the building system reference."""
         self.building_system = building_system
 
+    def set_ship_ai_system(self, ship_ai_system) -> None:
+        """Set the ship AI system reference for route activation."""
+        self._ship_ai_system = ship_ai_system
+
     def handle_resize(self, new_width: int, new_height: int, new_screen: pygame.Surface) -> None:
         """Handle window resize event.
 
@@ -347,7 +357,6 @@ class Renderer:
 
         # Update UI element positions
         self.status_bar = StatusBar(new_width, new_height)
-        self.minimap = MiniMap(x=new_width - 160, y=10, size=150)
         self.build_menu = BuildMenuPanel(x=new_width - 300, y=170)
         self.ship_menu = ShipPurchasePanel(x=new_width - 300, y=170)
         self.notifications = NotificationPanel(x=new_width // 2 - 150, y=50)
@@ -1291,7 +1300,8 @@ class Renderer:
         if not self._world:
             return
 
-        from ..simulation.trade import ManualRoute
+        from ..simulation.trade import ManualRoute, CargoHold
+        from ..entities.ships import Ship
 
         # Find the route that was just assigned
         route = None
@@ -1319,6 +1329,37 @@ class Renderer:
         manual_route.add_waypoint(route['station1_id'], route['station1_name'])
         manual_route.add_waypoint(route['station2_id'], route['station2_name'])
 
+        # Ensure ship has CargoHold for trading
+        cargo = em.get_component(ship_entity, CargoHold)
+        if not cargo:
+            # Get cargo capacity from ship type
+            ship_comp = em.get_component(ship_entity, Ship)
+            capacity = 100.0  # Default
+            if ship_comp:
+                from ..entities.ships import ShipType
+                capacities = {
+                    ShipType.SHUTTLE: 20,
+                    ShipType.FREIGHTER: 100,
+                    ShipType.BULK_HAULER: 300,
+                    ShipType.TANKER: 200,
+                    ShipType.DRONE: 20,
+                }
+                capacity = capacities.get(ship_comp.ship_type, 100)
+
+            cargo = CargoHold(capacity=capacity)
+            em.add_component(ship_entity, cargo)
+
+        # Remove Trader component if present - ManualRoute takes priority
+        # and having both can confuse the AI selection logic
+        from ..simulation.trade import Trader
+        trader = em.get_component(ship_entity, Trader)
+        if trader:
+            em.remove_component(ship_entity, Trader)
+
+        # Force the ship to immediately start the waypoint behavior
+        if self._ship_ai_system:
+            self._ship_ai_system.force_waypoint_behavior(em, ship_id)
+
     def _close_all_menus(self) -> None:
         """Close all open menus using the menu manager."""
         self.menu_manager.close_all()
@@ -1331,7 +1372,7 @@ class Renderer:
         # Render based on view mode
         if self.view_mode == ViewMode.SECTOR:
             # Sector view - square grid with static body positions
-            self.sector_view.update(self.mouse_screen_x, self.mouse_screen_y)
+            self.sector_view.update(self.mouse_screen_x, self.mouse_screen_y, world)
             # Pass build mode state to sector view
             self.sector_view.build_mode_active = self.build_mode_active
             self.sector_view.selected_station_type = self.selected_station_type
@@ -1339,6 +1380,16 @@ class Renderer:
                 self.screen, world, self.player_faction_id,
                 self.mouse_screen_x, self.mouse_screen_y
             )
+
+            # Update and render sector economy panel (player assets only)
+            if self.sector_view.current_sector:
+                sector_id = self.sector_view.current_sector.id
+                self.sector_economy.set_player_faction(self.player_faction_id)
+                self.sector_economy.update_sector_data(world, sector_id)
+                self.sector_economy.visible = True
+                self.sector_economy.draw(self.screen, self.font)
+            else:
+                self.sector_economy.visible = False
         else:
             # Solar system map view
             # Update hovered sector
@@ -1355,10 +1406,8 @@ class Renderer:
             # Draw celestial bodies with sector grid overlays
             self._render_celestial_bodies(world)
 
-            # Only show ships that are in transit between sectors or
-            # if their sector is being hovered
-            if self.show_trade_routes:
-                self._render_trade_routes(world)
+            # Render ship trails (fading paths showing where ships have been)
+            self._render_ship_trails(world)
 
             # Ships shown only when relevant (hovering sector or in transit)
             self._render_ships_solar_map(world)
@@ -1501,6 +1550,19 @@ class Renderer:
                 grid_size = max(radius * 3, 40)
                 grid_color = (50, 60, 80) if not is_hovered_sector else (80, 100, 140)
 
+                # Draw faint sector zone circle when hovering
+                if is_hovered_sector:
+                    zone_radius = max(grid_size, radius * 4)
+                    pygame.draw.circle(
+                        self.screen, (40, 60, 100),
+                        (screen_x, screen_y), zone_radius, 1
+                    )
+                    # Draw a subtle glow
+                    pygame.draw.circle(
+                        self.screen, (30, 45, 75),
+                        (screen_x, screen_y), zone_radius + 5, 1
+                    )
+
                 # Draw grid box around planet
                 grid_rect = pygame.Rect(
                     screen_x - grid_size // 2,
@@ -1550,10 +1612,78 @@ class Renderer:
                 label = self.font.render(entity.name, True, COLORS['ui_text'])
                 self.screen.blit(label, (screen_x + radius + 5, screen_y - 8))
 
+                # Show ship count badge if sector has ships
+                if sector_id:
+                    ship_count = self._count_ships_in_sector(world, sector_id)
+                    if ship_count > 0:
+                        badge_text = str(ship_count)
+                        badge_surf = self.font.render(badge_text, True, (200, 220, 255))
+                        badge_x = screen_x - radius - badge_surf.get_width() - 5
+                        badge_y = screen_y - badge_surf.get_height() // 2
+
+                        # Draw badge background
+                        badge_rect = pygame.Rect(
+                            badge_x - 3, badge_y - 2,
+                            badge_surf.get_width() + 6, badge_surf.get_height() + 4
+                        )
+                        pygame.draw.rect(self.screen, (30, 40, 60), badge_rect)
+                        pygame.draw.rect(self.screen, (60, 80, 120), badge_rect, 1)
+                        self.screen.blit(badge_surf, (badge_x, badge_y))
+
                 # Show "Double-click to enter" hint when hovering
                 if is_hovered_sector:
                     hint = self.font.render("Double-click to enter", True, (150, 180, 200))
                     self.screen.blit(hint, (screen_x + radius + 5, screen_y + 8))
+
+    def _render_ship_trails(self, world: World) -> None:
+        """Render ship trails as fading line segments.
+
+        Creates the "ant farm" visual effect by showing where ships have traveled.
+        Older trail points are more transparent.
+        """
+        from ..entities.trails import Trail
+
+        em = world.entity_manager
+
+        for entity, trail in em.get_all_components(Trail):
+            if not trail.points or len(trail.points) < 2:
+                continue
+
+            # Draw line segments between consecutive points
+            for i in range(len(trail.points) - 1):
+                p1 = trail.points[i]
+                p2 = trail.points[i + 1]
+
+                # Convert to screen coordinates
+                x1, y1 = self.camera.world_to_screen(p1.x, p1.y)
+                x2, y2 = self.camera.world_to_screen(p2.x, p2.y)
+
+                # Skip if segment is off screen
+                if not self._line_visible((x1, y1), (x2, y2)):
+                    continue
+
+                # Calculate alpha based on age (older = more transparent)
+                # p1 is older than p2
+                age_ratio = p1.timestamp / trail.max_age
+                alpha = int(255 * (1.0 - age_ratio) * 0.6)  # Max 60% opacity
+                alpha = max(0, min(255, alpha))
+
+                if alpha < 10:
+                    continue
+
+                # Trail color: cyan-ish for visibility
+                base_color = (100, 180, 255)
+
+                # Draw the segment with alpha
+                # Since pygame lines don't support alpha directly, we draw with adjusted color
+                # Blend with background approximation
+                color = (
+                    int(base_color[0] * alpha / 255),
+                    int(base_color[1] * alpha / 255),
+                    int(base_color[2] * alpha / 255),
+                )
+
+                pygame.draw.line(self.screen, color, (x1, y1), (x2, y2), 1)
 
     def _render_stations(self, world: World) -> None:
         """Render stations."""
@@ -1707,9 +1837,9 @@ class Renderer:
     def _render_ships_solar_map(self, world: World) -> None:
         """Render ships on solar system map.
 
-        Only shows ships that are:
-        - In transit (not parked at a body)
-        - In a sector that is being hovered
+        Only shows ships that are in transit between sectors.
+        Ships "emerge" when they leave a sector and "disappear" when they arrive.
+        This creates clean visuals - parked ships are only visible in sector view.
         """
         from ..solar_system.orbits import Position, Velocity, ParentBody, NavigationTarget
         from ..entities.ships import Ship, ShipType
@@ -1727,22 +1857,14 @@ class Renderer:
             if not pos:
                 continue
 
-            # Check if ship should be shown
-            # 1. Ship is in transit (has NavigationTarget, no ParentBody)
-            # 2. Ship's sector is being hovered
+            # Only show ships that are in transit (not parked)
             parent = em.get_component(entity, ParentBody)
             nav_target = em.get_component(entity, NavigationTarget)
 
-            # Determine ship's current sector
-            ship_sector_id = None
-            if parent:
-                ship_sector_id = get_sector_id_for_body(parent.parent_name)
-
-            is_in_transit = nav_target is not None and parent is None
-            is_hovered_sector = ship_sector_id and ship_sector_id == self.hovered_sector_id
-
-            # Only show if in transit or sector is hovered
-            if not is_in_transit and not is_hovered_sector:
+            # Ship must be actively traveling (no ParentBody, has destination)
+            if parent is not None:  # Ship parked
+                continue
+            if nav_target is None:  # No destination
                 continue
 
             screen_x, screen_y = self.camera.world_to_screen(pos.x, pos.y)
@@ -1776,13 +1898,12 @@ class Renderer:
 
             pygame.draw.polygon(self.screen, ship_color, points)
 
-            # Draw route line for ships in transit
-            if is_in_transit and nav_target:
-                target_x, target_y = self.camera.world_to_screen(nav_target.target_x, nav_target.target_y)
-                pygame.draw.line(
-                    self.screen, (100, 150, 200),
-                    (screen_x, screen_y), (target_x, target_y), 1
-                )
+            # Draw route line to destination
+            target_x, target_y = self.camera.world_to_screen(nav_target.target_x, nav_target.target_y)
+            pygame.draw.line(
+                self.screen, (100, 150, 200),
+                (screen_x, screen_y), (target_x, target_y), 1
+            )
 
     def _render_ui(self, world: World, fps: float) -> None:
         """Render UI elements."""
@@ -1796,10 +1917,6 @@ class Renderer:
 
         # Draw status bar
         self.status_bar.draw_status(self.screen, self.font, world, fps)
-
-        # Draw minimap
-        camera_bounds = self.camera.get_visible_bounds()
-        self.minimap.draw_minimap(self.screen, world, camera_bounds)
 
         # Update and draw build menu if visible
         if self.build_menu_visible:
@@ -1948,46 +2065,6 @@ class Renderer:
         """Toggle label display."""
         self.show_labels = not self.show_labels
 
-    def _render_trade_routes(self, world: World) -> None:
-        """Render trade route lines from ships to their destinations."""
-        from ..solar_system.orbits import Position, NavigationTarget
-        from ..entities.ships import Ship
-
-        em = world.entity_manager
-
-        for entity, ship in em.get_all_components(Ship):
-            # Get ship position
-            ship_pos = em.get_component(entity, Position)
-            if not ship_pos:
-                continue
-
-            # Check NavigationTarget component for destination
-            nav_target = em.get_component(entity, NavigationTarget)
-            if not nav_target:
-                continue
-
-            # Only draw if ship has a valid destination
-            if nav_target.target_x == 0 and nav_target.target_y == 0:
-                continue
-
-            # Convert to screen coordinates
-            ship_screen = self.camera.world_to_screen(ship_pos.x, ship_pos.y)
-            dest_screen = self.camera.world_to_screen(nav_target.target_x, nav_target.target_y)
-
-            # Skip if both points are off screen
-            if not self._line_visible(ship_screen, dest_screen):
-                continue
-
-            # Draw dotted route line
-            self._draw_dotted_line(
-                self.screen,
-                (100, 150, 255),  # Light blue for travel paths
-                ship_screen,
-                dest_screen,
-                dot_length=8,
-                gap_length=4
-            )
-
     def _line_visible(self, p1: tuple[int, int], p2: tuple[int, int]) -> bool:
         """Check if a line between two screen points would be visible."""
         margin = 50
@@ -2000,55 +2077,34 @@ class Renderer:
         return (max_x >= -margin and min_x <= self.camera.screen_width + margin and
                 max_y >= -margin and min_y <= self.camera.screen_height + margin)
 
-    def _draw_dotted_line(
-        self,
-        surface: pygame.Surface,
-        color: tuple[int, int, int],
-        start: tuple[int, int],
-        end: tuple[int, int],
-        dot_length: int = 5,
-        gap_length: int = 3
-    ) -> None:
-        """Draw a dotted line between two points.
+    def _count_ships_in_sector(self, world: World, sector_id: str) -> int:
+        """Count ships parked in a sector.
 
         Args:
-            surface: Surface to draw on
-            color: Line color
-            start: Start point (x, y)
-            end: End point (x, y)
-            dot_length: Length of each dot segment in pixels
-            gap_length: Length of gap between dots in pixels
+            world: Game world
+            sector_id: Sector ID to count ships in
+
+        Returns:
+            Number of ships parked in the sector
         """
-        dx = end[0] - start[0]
-        dy = end[1] - start[1]
-        length = math.sqrt(dx * dx + dy * dy)
+        from ..entities.ships import Ship
+        from ..solar_system.orbits import ParentBody
 
-        if length < 1:
-            return
+        if sector_id not in SECTORS:
+            return 0
 
-        # Normalize direction
-        dx /= length
-        dy /= length
+        sector = SECTORS[sector_id]
+        sector_bodies = {body.name for body in sector.bodies}
 
-        segment_length = dot_length + gap_length
-        pos = 0.0
+        em = world.entity_manager
+        count = 0
 
-        while pos < length:
-            # Calculate segment start and end
-            seg_start_x = start[0] + dx * pos
-            seg_start_y = start[1] + dy * pos
-            seg_end_pos = min(pos + dot_length, length)
-            seg_end_x = start[0] + dx * seg_end_pos
-            seg_end_y = start[1] + dy * seg_end_pos
+        for entity, ship in em.get_all_components(Ship):
+            parent = em.get_component(entity, ParentBody)
+            if parent and parent.parent_name in sector_bodies:
+                count += 1
 
-            pygame.draw.line(
-                surface, color,
-                (int(seg_start_x), int(seg_start_y)),
-                (int(seg_end_x), int(seg_end_y)),
-                1
-            )
-
-            pos += segment_length
+        return count
 
     def toggle_price_graph(self) -> None:
         """Toggle price history graph visibility."""

@@ -26,8 +26,8 @@ class PatrolBehavior(ShipBehavior):
 
     def __init__(self) -> None:
         self.max_patrol_distance = 3.0  # AU
-        self.min_wait_time = 2.0  # seconds
-        self.max_wait_time = 8.0  # seconds
+        self.min_wait_time = 0.5  # seconds (reduced from 2.0 for more activity)
+        self.max_wait_time = 3.0  # seconds (reduced from 8.0 for more activity)
 
     @property
     def name(self) -> str:
@@ -50,7 +50,7 @@ class PatrolBehavior(ShipBehavior):
             if target:
                 ctx.state_data["patrol_target_id"] = target.id
                 ctx.state_data["patrol_state"] = PatrolState.TRAVELING
-                return self._navigate_to_station(ctx, target.id)
+                return self._navigate_to_target(ctx, target.id)
             else:
                 # No targets - wait and try again
                 return BehaviorResult(
@@ -86,16 +86,19 @@ class PatrolBehavior(ShipBehavior):
         return BehaviorResult(status=BehaviorStatus.RUNNING)
 
     def _select_patrol_target(self, ctx: BehaviorContext):
-        """Select a station to patrol to.
+        """Select a destination to patrol to.
 
-        Prefers nearby stations but occasionally picks farther ones.
+        Includes both stations and celestial bodies for more varied movement.
+        Prefers nearby targets but occasionally picks farther ones.
         """
         from ...entities.stations import Station
+        from ...entities.celestial import CelestialBody
         from ...solar_system.orbits import Position
 
         em = ctx.entity_manager
-        stations_by_dist: list[tuple] = []
+        targets_by_dist: list[tuple] = []
 
+        # Collect stations as targets
         for entity, station in em.get_all_components(Station):
             pos = em.get_component(entity, Position)
             if not pos:
@@ -105,54 +108,79 @@ class PatrolBehavior(ShipBehavior):
             if dist > self.max_patrol_distance:
                 continue
 
-            stations_by_dist.append((entity, dist))
+            targets_by_dist.append((entity, dist, 'station'))
 
-        if not stations_by_dist:
+        # Also collect planets/moons as targets (30% chance to consider)
+        if random.random() < 0.3:
+            for entity, body in em.get_all_components(CelestialBody):
+                # Only patrol to planets and moons, not the sun
+                if body.body_type.value not in ('planet', 'moon', 'dwarf_planet'):
+                    continue
+
+                pos = em.get_component(entity, Position)
+                if not pos:
+                    continue
+
+                dist = ctx.position.distance_to(pos)
+                if dist > self.max_patrol_distance:
+                    continue
+
+                targets_by_dist.append((entity, dist, 'body'))
+
+        if not targets_by_dist:
             return None
 
         # Sort by distance
-        stations_by_dist.sort(key=lambda x: x[1])
+        targets_by_dist.sort(key=lambda x: x[1])
 
-        # If we're near a station (first one), pick a different target
-        if stations_by_dist[0][1] < 0.1 and len(stations_by_dist) > 1:
-            # Weight towards closer stations but allow farther ones
-            # Take from the first 5 stations (excluding current)
-            candidates = stations_by_dist[1:min(6, len(stations_by_dist))]
+        # If we're near a target (first one), pick a different one
+        if targets_by_dist[0][1] < 0.1 and len(targets_by_dist) > 1:
+            # Weight towards closer targets but allow farther ones
+            # Take from the first 5 targets (excluding current)
+            candidates = targets_by_dist[1:min(6, len(targets_by_dist))]
             if candidates:
                 return random.choice(candidates)[0]
 
-        # Not near any station - go to closest
-        return stations_by_dist[0][0]
+        # Not near any target - go to closest
+        return targets_by_dist[0][0]
 
-    def _navigate_to_station(self, ctx: BehaviorContext, station_id: UUID) -> BehaviorResult:
-        """Create navigation result for a station."""
+    def _navigate_to_target(self, ctx: BehaviorContext, target_id: UUID) -> BehaviorResult:
+        """Create navigation result for a station or celestial body."""
         from ...solar_system.orbits import Position
         from ...entities.stations import Station
+        from ...entities.celestial import CelestialBody
 
-        station = ctx.get_entity(station_id)
-        if not station:
+        target = ctx.get_entity(target_id)
+        if not target:
             return BehaviorResult(
                 status=BehaviorStatus.FAILURE,
-                message=f"Station {station_id} not found"
+                message=f"Target {target_id} not found"
             )
 
-        pos = ctx.entity_manager.get_component(station, Position)
-        station_comp = ctx.entity_manager.get_component(station, Station)
-
+        pos = ctx.entity_manager.get_component(target, Position)
         if not pos:
             return BehaviorResult(
                 status=BehaviorStatus.FAILURE,
-                message="Station has no position"
+                message="Target has no position"
             )
 
-        target_body = station_comp.parent_body if station_comp else ""
+        # Determine target body for sector navigation
+        target_body = ""
+        station_comp = ctx.entity_manager.get_component(target, Station)
+        if station_comp:
+            target_body = station_comp.parent_body
+        else:
+            # It's a celestial body - use its name
+            body_comp = ctx.entity_manager.get_component(target, CelestialBody)
+            if body_comp:
+                target_body = target.name
 
         return BehaviorResult(
             status=BehaviorStatus.RUNNING,
             target_x=pos.x,
             target_y=pos.y,
             target_body=target_body,
-            target_entity_id=station_id,
+            target_entity_id=target_id,
         )
 
     def get_priority(self, ctx: BehaviorContext) -> float:
